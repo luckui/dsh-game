@@ -1,0 +1,7 @@
+packages:
+  - packages/*
+allowBuilds:
+  esbuild: true
+# pnpm 10 的写法（pnpm 12 用上面的 allowBuilds）
+onlyBuiltDependencies:
+  - esbuild

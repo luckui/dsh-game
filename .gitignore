@@ -1,0 +1,18 @@
+tools/node/
+.dsh-home/
+.runtime/
+node_modules/
+packages/*/lib/
+*.log
+.env
+.dev.env
+video-work/
+packages/dsh-game/assets/werewolf/*.png
+
+# 本地开发记录和个人工具（不发布）
+DESIGN.md
+VIDEO.md
+tools/obs.mjs
+tools/werewolf-art.mjs
+tools/export-run.mjs
+tools/analyze-session.mjs
