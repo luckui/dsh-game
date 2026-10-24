@@ -13,6 +13,7 @@ import { GameSettingsController, GameSettingsPage, PACKAGE_NAME, SETTINGS_CSS, t
 import { FISH_CSS, FloatingFish, useDocked } from './stage.js';
 import { WOLF_CSS } from './wolf.js';
 import { WOLF_SETUP_CSS } from './wolfsetup.js';
+import { MC_SETUP_CSS } from './mcsetup.js';
 
 export const inject = ['slots', 'layout', 'workspaces', 'uiWorkspace', 'sessions', 'remote', 'remote.agentPresets'];
 
@@ -32,7 +33,7 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => {
     const tag = document.createElement('style');
     tag.dataset.plugin = 'dsh-game';
-    tag.textContent = ROOM_CSS + FISH_CSS + GAMETAB_CSS + LIBRARY_CSS + SETTINGS_CSS + WOLF_CSS + WOLF_SETUP_CSS;
+    tag.textContent = ROOM_CSS + FISH_CSS + GAMETAB_CSS + LIBRARY_CSS + SETTINGS_CSS + WOLF_CSS + WOLF_SETUP_CSS + MC_SETUP_CSS;
     document.head.append(tag);
     return () => tag.remove();
   }, 'dsh-game styles');

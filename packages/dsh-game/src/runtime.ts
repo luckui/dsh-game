@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { libraryInfo as ddlcLibraryInfo } from './games/ddlc/profile.js';
 import { DdlcSession } from './games/ddlc/session.js';
 import { MinecraftSession } from './games/minecraft/session.js';
+import { checkSetup as checkMcSetup, loadSetup as loadMcSetup, saveSetup as saveMcSetup, type McSetup } from './games/minecraft/setup.js';
 import { NARRATOR_RATE, NARRATOR_VOICE } from './games/werewolf/characters.js';
 import type { WolfEntry, WolfState } from './games/werewolf/engine.js';
 import { WerewolfSession } from './games/werewolf/session.js';
@@ -161,6 +162,19 @@ export const minecraftCameraDir = (): string => path.join(process.env.DSH_HOME ?
 export const onAir = (): LiveBody | null => {
   const live = hooks.live?.();
   return live?.onAir ? live : null;
+};
+
+/** Minecraft 的开局设置：旧版插件设置（mc*）只在第一次搬过来 */
+const legacyMc = () => ({
+  host: settings.mcHost, port: Number(settings.mcPort) || undefined, username: settings.mcUsername,
+  camera: settings.mcCamera, cameraName: settings.mcCameraName, rconPort: Number(settings.mcRconPort) || undefined,
+  rconPassword: settings.mcRconPassword, clientDir: settings.mcClientDir, java: settings.mcJava, hudPort: Number(settings.mcHudPort),
+});
+export const mcSetup = {
+  load: () => loadMcSetup(legacyMc()),
+  save: (setup: Partial<McSetup>) => saveMcSetup(setup, legacyMc()),
+  /** 这局 Minecraft 正开着时，HUD 网页的端口是我们自己占着的 */
+  check: () => checkMcSetup(loadMcSetup(legacyMc()), games.session?.id === 'minecraft'),
 };
 
 /** 狼人杀的开局设置：旧版插件设置只在第一次搬过来 */
@@ -383,25 +397,30 @@ export const GAMES = {
       name: 'Minecraft',
       subtitle: 'Java 版 · 生存',
       tags: ['沙盒', '生存', '服务器'],
-      blurb: `大肥鱼以 ${settings.mcUsername} 的身份进一个 Minecraft 服务器自己玩：砍树、合成、挖矿、打怪，跟她说想看什么她就去做。需要 Java 版服务器（默认 ${settings.mcHost}:${settings.mcPort}）。`,
+      blurb: `大肥鱼以 ${mcSetup.load().username} 的身份进一个 Minecraft 服务器自己玩：砍树、合成、挖矿、打怪，跟她说想看什么她就去做。服务器、摄像机这些在下面的开局设置里。`,
       installed: true,
       getUrl: 'https://www.minecraft.net/',
       savedAt: null,
     }),
-    create: () => new MinecraftSession({
-      workerPath: minecraftWorkerPath(),
-      host: settings.mcHost,
-      port: Number(settings.mcPort) || 25565,
-      username: settings.mcUsername,
-      camera: settings.mcCamera
-        ? { name: settings.mcCameraName, clientDir: settings.mcClientDir, java: settings.mcJava, hudPort: Number(settings.mcHudPort) || 0, gameDir: minecraftCameraDir() }
-        : null,
-      log: (text) => console.log(text),
-      onStateChange: () => announceGameState(),
-      rcon: settings.mcRconPassword ? { host: settings.mcHost, port: Number(settings.mcRconPort) || 25575, password: settings.mcRconPassword } : null,
-      record,
-      onAction: (text) => broadcast({ type: 'act', text, at: Date.now() }),
-    }),
+    create: () => {
+      const setup = mcSetup.load();
+      return new MinecraftSession({
+        workerPath: minecraftWorkerPath(),
+        host: setup.host,
+        port: setup.port,
+        username: setup.username,
+        camera: setup.camera
+          ? { name: setup.cameraName, clientDir: setup.clientDir, java: setup.java, hudPort: setup.hudPort, gameDir: minecraftCameraDir() }
+          : null,
+        log: (text) => console.log(text),
+        onStateChange: () => announceGameState(),
+        rcon: setup.rconPassword ? { host: setup.host, port: setup.rconPort, password: setup.rconPassword } : null,
+        // 开局前先查一遍开局设置（她自己调 game_start 时也一样），没过就不开
+        preflight: () => mcSetup.check().then((c) => c.problem),
+        record,
+        onAction: (text) => broadcast({ type: 'act', text, at: Date.now() }),
+      });
+    },
   },
 } as const;
 export type GameId = keyof typeof GAMES;

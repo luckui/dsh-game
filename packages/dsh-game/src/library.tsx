@@ -9,6 +9,7 @@ import React, { useEffect, useState } from 'react';
 import { Ambient } from './ambient.js';
 import { clipUrl } from './stage.js';
 import { WolfSetupPanel, type SetupCheck } from './wolfsetup.js';
+import { McSetupPanel, type McSetupCheck } from './mcsetup.js';
 
 export const PANEL_ID = 'dsh-game';
 /** cordis.patch.yml 里插入的预设 */
@@ -206,6 +207,8 @@ export function GameLibrary() {
   const [error, setError] = useState<string | null>(null);
   // 狼人杀的开局设置检查结果（选中狼人杀时面板给的）
   const [wolfCheck, setWolfCheck] = useState<SetupCheck | null>(null);
+  // Minecraft 的开局设置检查结果（选中 Minecraft 时面板给的）
+  const [mcCheck, setMcCheck] = useState<McSetupCheck | null>(null);
 
   useEffect(() => {
     fetch('/api/dsh-game/library').then((r) => r.json()).then(setEntries).catch(() => setEntries([]));
@@ -241,11 +244,16 @@ export function GameLibrary() {
           <Hero
             entry={current}
             busy={busy === current.id}
-            blocked={current.id === 'werewolf' ? (wolfCheck ? (wolfCheck.problem ? '开局设置有问题，见下面' : null) : '正在检查开局设置……') : null}
+            blocked={current.id === 'werewolf'
+              ? (wolfCheck ? (wolfCheck.problem ? '开局设置有问题，见下面' : null) : '正在检查开局设置……')
+              : current.id === 'minecraft'
+                ? (mcCheck ? (mcCheck.problem ? '开局设置有问题，见下面' : null) : '正在检查服务器和客户端……')
+                : null}
             onPlay={() => void start(current)}
           />
         )}
         {current?.id === 'werewolf' && <WolfSetupPanel onCheck={setWolfCheck} />}
+        {current?.id === 'minecraft' && <McSetupPanel onCheck={setMcCheck} />}
         <div className="dg-section">游戏库 <span>{entries ? entries.length : '…'}</span></div>
         <div className="dg-shelf">
           {entries?.map((entry) => (

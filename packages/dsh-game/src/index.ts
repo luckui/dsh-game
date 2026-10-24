@@ -12,8 +12,9 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import z from '@deepseek-ai/schemastery';
-import { GAMES, minecraftCameraDir, assetsDir, audio, bindSettings, clipsDir, STEAM_ART, games, hooks, listeners, settings, speeches, watchFrames, wolfSetup, type ArtKind, type GameId, type LiveBody, type Settings, type StageEvent } from './runtime.js';
+import { GAMES, mcSetup, minecraftCameraDir, assetsDir, audio, bindSettings, clipsDir, STEAM_ART, games, hooks, listeners, settings, speeches, watchFrames, wolfSetup, type ArtKind, type GameId, type LiveBody, type Settings, type StageEvent } from './runtime.js';
 import type { WolfSetup } from './games/werewolf/setup.js';
+import type { McSetup } from './games/minecraft/setup.js';
 import { DEFAULT_VOICE } from './tts.js';
 import { deleteCharacter, findDdlcDir } from './games/ddlc/profile.js';
 import { WerewolfSession, devOptions } from './games/werewolf/session.js';
@@ -47,16 +48,16 @@ export const Config = z.object({
   // 旧版的狼人杀座位设置：现在在游戏库「狼人杀」的开局设置里，这两项只在第一次打开开局设置时搬过去
   wolfModel: z.string().default('deepseek-official/deepseek-flash').description('（旧）狼人杀默认模型，已移到游戏库的开局设置').volatile(),
   wolfSeats: z.string().description('（旧）狼人杀座位配置，已移到游戏库的开局设置').volatile(),
-  mcHost: z.string().default('127.0.0.1').description('Minecraft 服务器地址（Java 版）').volatile(),
-  mcPort: z.natural().default(25565).description('Minecraft 服务器端口').volatile(),
-  mcUsername: z.string().default('DaFeiYu').description('大肥鱼在 Minecraft 里的名字（英文、数字、下划线，3~16 个字）').volatile(),
-  mcRconPort: z.natural().default(25575).description('自己服务器的 RCON 端口').volatile(),
-  mcCamera: z.boolean().default(true).description('开摄像机客户端：一个真的 Minecraft 客户端（离线账户、旁观模式）自动挂在她身上，画面就是她的视角；直播时 OBS 抓这个窗口（需要填 RCON 密码）').volatile(),
-  mcClientDir: z.string().description('装好游戏的 .minecraft 目录（HMCL 或官方启动器装的；不填就用官方启动器的默认位置）').volatile(),
-  mcJava: z.string().description('Java 21 的路径（不填就自动找 HMCL / 官方启动器带的）').volatile(),
-  mcCameraName: z.string().default('DaFeiYuCam').description('摄像机在服务器里的名字').volatile(),
-  mcHudPort: z.natural().default(7391).description('摄像机 HUD 网页的端口（血量、饱食度、快捷栏；直播时作为 OBS 浏览器源叠在游戏窗口上，0 = 不开）').volatile(),
-  mcRconPassword: z.string().role('secret').description('自己服务器的 RCON 密码（server.properties 里的 rcon.password）；填了的话，旁观模式的玩家会自动挂到她身上').volatile(),
+  mcHost: z.string().default('127.0.0.1').description('（旧）Minecraft 服务器地址（Java 版）。已移到游戏库 Minecraft 的开局设置，这里只在第一次打开开局设置时搬过去').volatile(),
+  mcPort: z.natural().default(25565).description('（旧）Minecraft 服务器端口。已移到游戏库 Minecraft 的开局设置，这里只在第一次打开开局设置时搬过去').volatile(),
+  mcUsername: z.string().default('DaFeiYu').description('（旧）大肥鱼在 Minecraft 里的名字（英文、数字、下划线，3~16 个字）。已移到游戏库 Minecraft 的开局设置，这里只在第一次打开开局设置时搬过去').volatile(),
+  mcRconPort: z.natural().default(25575).description('（旧）自己服务器的 RCON 端口。已移到游戏库 Minecraft 的开局设置，这里只在第一次打开开局设置时搬过去').volatile(),
+  mcCamera: z.boolean().default(true).description('（旧）开摄像机客户端：一个真的 Minecraft 客户端（离线账户、旁观模式）自动挂在她身上，画面就是她的视角；直播时 OBS 抓这个窗口（需要填 RCON 密码）。已移到游戏库 Minecraft 的开局设置，这里只在第一次打开开局设置时搬过去').volatile(),
+  mcClientDir: z.string().description('（旧）装好游戏的 .minecraft 目录（HMCL 或官方启动器装的；不填就用官方启动器的默认位置）。已移到游戏库 Minecraft 的开局设置，这里只在第一次打开开局设置时搬过去').volatile(),
+  mcJava: z.string().description('（旧）Java 21 的路径（不填就自动找 HMCL / 官方启动器带的）。已移到游戏库 Minecraft 的开局设置，这里只在第一次打开开局设置时搬过去').volatile(),
+  mcCameraName: z.string().default('DaFeiYuCam').description('（旧）摄像机在服务器里的名字。已移到游戏库 Minecraft 的开局设置，这里只在第一次打开开局设置时搬过去').volatile(),
+  mcHudPort: z.natural().default(7391).description('（旧）摄像机 HUD 网页的端口（血量、饱食度、快捷栏；直播时作为 OBS 浏览器源叠在游戏窗口上，0 = 不开）。已移到游戏库 Minecraft 的开局设置，这里只在第一次打开开局设置时搬过去').volatile(),
+  mcRconPassword: z.string().role('secret').description('（旧）自己服务器的 RCON 密码（server.properties 里的 rcon.password）；填了的话，旁观模式的玩家会自动挂到她身上。已移到游戏库 Minecraft 的开局设置，这里只在第一次打开开局设置时搬过去').volatile(),
 });
 
 interface HostContext {
@@ -216,6 +217,18 @@ export function apply(ctx: HostContext, config: LiveConfig = {}): void {
     return lists.flat();
   };
   ctx.effect(() => () => { hooks.listModels = undefined; }, 'dsh-game model list');
+
+  // Minecraft 的开局设置：GET 读设置和检查结果；PUT 存了再检查一遍
+  route('/api/dsh-game/mc-setup', ['GET', 'PUT'], async (request) => {
+    if (request.method === 'PUT') {
+      try {
+        mcSetup.save(await request.json() as Partial<McSetup>);
+      } catch (err) {
+        return new Response(JSON.stringify({ error: `没存上：${(err as Error).message}` }), { status: 400, headers: { 'content-type': 'application/json' } });
+      }
+    }
+    return new Response(JSON.stringify(await mcSetup.check()), { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+  }, 'dsh-game minecraft setup');
 
   // 狼人杀的开局设置：GET 读设置和检查结果；PUT 存了再检查一遍
   route('/api/dsh-game/wolf-setup', ['GET', 'PUT'], async (request) => {

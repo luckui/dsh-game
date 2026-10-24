@@ -26,6 +26,8 @@ export interface MinecraftOptions {
   record: (event: RunEvent) => void;
   /** 她在游戏里做的事（给舞台终端显示） */
   onAction?: (text: string) => void;
+  /** 开局前的检查：有问题返回原因（开局设置不对时不开局） */
+  preflight?: () => Promise<string | null>;
   /** 摄像机客户端（真的 Minecraft 客户端，旁观模式挂在她身上）；null = 不开。要有 RCON 才能把它切成旁观 */
   camera?: { name: string; clientDir: string; java: string; gameDir: string; hudPort: number } | null;
   log?: (text: string) => void;
@@ -125,6 +127,11 @@ export class MinecraftSession implements GameSession {
   private lastDimension: string | null = null;
   private lastRespectate = 0;
   private camera: CameraClient | null = null;
+  private preflightFailed = false;
+  /** 开局前检查没过：这局其实没开 */
+  get started(): boolean {
+    return !this.preflightFailed;
+  }
   private hudTimer: NodeJS.Timeout | null = null;
   private hudBusy = false;
   /** 摄像机的人称（F5 三档循环：她的视角 → 背后 → 正面）；新开的客户端是她的视角 */
@@ -159,6 +166,12 @@ export class MinecraftSession implements GameSession {
 
   async start(): Promise<string> {
     if (this.runtime && this.status?.connected) return this.describeNow('还在游戏里');
+    const problem = await this.options.preflight?.().catch((err: Error) => `检查开局设置时出错：${err.message}`);
+    if (problem) {
+      this.preflightFailed = true;
+      return `这局开不了：${problem}。主人要在游戏库的 Minecraft 开局设置里改好。`;
+    }
+    this.preflightFailed = false;
     const runtime = this.runtime ?? new MinecraftRuntimeManager({ workerPath: this.options.workerPath });
     this.runtime = runtime;
     this.unsubscribe ??= runtime.onEvent((event) => this.onBodyEvent(event));
