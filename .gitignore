@@ -14,6 +14,7 @@ DESIGN.md
 VIDEO.md
 tools/obs.mjs
 tools/werewolf-art.mjs
+tools/minecraft-art.mjs
 tools/export-run.mjs
 tools/analyze-session.mjs
 

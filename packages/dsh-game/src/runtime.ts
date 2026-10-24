@@ -401,6 +401,8 @@ export const GAMES = {
       installed: true,
       getUrl: 'https://www.minecraft.net/',
       savedAt: null,
+      // 方块人大肥鱼的封面和横幅（Codex 画的，tools/minecraft-art.mjs）
+      localArt: { capsule: 'minecraft/capsule.jpg', hero: 'minecraft/cover.jpg' },
     }),
     create: () => {
       const setup = mcSetup.load();

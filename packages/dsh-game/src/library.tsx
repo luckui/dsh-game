@@ -28,6 +28,8 @@ interface LibraryEntry {
   savedAt: string | null;
   /** 插件自带的游戏（不用安装） */
   builtin?: boolean;
+  /** 插件自己带美术（封面里画了大肥鱼） */
+  localArt?: Record<string, string>;
 }
 
 interface RemoteResult {
@@ -169,8 +171,8 @@ function Hero({ entry, busy, blocked, onPlay }: { entry: LibraryEntry; busy: boo
     <section className="dg-hero">
       <div className="dg-hero-art" style={{ backgroundImage: `url(${art(entry, 'hero')})` }}>
         {logo && <img className="dg-hero-logo" src={art(entry, 'logo')} alt="" onError={() => setLogo(false)} />}
-        {/* 插件自带的游戏：封面里本来就有大肥鱼 */}
-        {!entry.builtin && <video className="dg-hero-fish" src={clipUrl('riceloop')} muted autoPlay loop playsInline />}
+        {/* 插件自己带美术的游戏（狼人杀、Minecraft）：封面里本来就有大肥鱼 */}
+        {!entry.localArt && <video className="dg-hero-fish" src={clipUrl('riceloop')} muted autoPlay loop playsInline />}
       </div>
       <div className="dg-hero-bar">
         <div className="dg-hero-text">
