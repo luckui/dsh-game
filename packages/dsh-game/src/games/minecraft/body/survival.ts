@@ -23,6 +23,21 @@ function failed(started: number, code: MinecraftActionErrorCode, message: string
   };
 }
 
+function counts(bot: any): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const i of bot.inventory?.items?.() ?? []) out[i.name] = (out[i.name] ?? 0) + i.count;
+  return out;
+}
+
+function difference(before: Record<string, number>, after: Record<string, number>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const d = (after[k] ?? 0) - (before[k] ?? 0);
+    if (d) out[k] = d;
+  }
+  return out;
+}
+
 function sealItem(bot: any): any | null {
   const items: any[] = bot.inventory?.items?.() ?? [];
   for (const name of SEAL_PREFERENCE) {
@@ -48,38 +63,42 @@ function hostilesNear(bot: any, radius: number, match: (e: any) => boolean = (e)
   return Object.values(bot.entities as Record<string, any>).filter((e) => e !== bot.entity && match(e) && e.position && e.position.distanceTo(me) <= radius);
 }
 
-/** 原地往下挖两格钻进去，再把头顶封上 */
+/**
+ * 原地往下挖三格钻进去，再把头顶封上。封口在地面那一层（洞口）：四周是地面的方块，新方块能贴着它们放；
+ * 只挖两格的话封口在地面上面一格，平地上四周和下面都是空的，放不上去
+ */
 export async function hideUnderground(bot: any, signal: AbortSignal): Promise<MinecraftActionResult> {
   const started = Date.now();
   const seal = sealItem(bot);
   if (!seal) return failed(started, 'missing_item', 'need a block to seal the hole above (dirt, cobblestone, planks...)');
+  const before = counts(bot);
   const feet: Vec3 = bot.entity.position.floored();
-  const below1 = bot.blockAt(feet.offset(0, -1, 0));
-  const below2 = bot.blockAt(feet.offset(0, -2, 0));
-  const below3 = bot.blockAt(feet.offset(0, -3, 0));
-  for (const b of [below1, below2]) {
+  const dig = [1, 2, 3].map((d) => bot.blockAt(feet.offset(0, -d, 0)));
+  const floor = bot.blockAt(feet.offset(0, -4, 0));
+  for (const b of dig) {
     if (!b) return failed(started, 'unsafe', 'the ground below is not loaded');
     if (LIQUID.has(b.name)) return failed(started, 'unsafe', `there is ${b.name} below, digging down here is dangerous`);
     if (b.name === 'bedrock') return failed(started, 'blocked', 'bedrock below, cannot dig down');
   }
-  if (!below3 || EMPTY.has(below3.name) || LIQUID.has(below3.name)) {
-    return failed(started, 'unsafe', `there is ${below3?.name ?? 'nothing'} under the hole (a cave or liquid), would fall in`);
+  if (!floor || EMPTY.has(floor.name) || LIQUID.has(floor.name)) {
+    return failed(started, 'unsafe', `there is ${floor?.name ?? 'nothing'} under the hole (a cave or liquid), would fall in`);
   }
-  for (const b of [below1, below2]) {
+  for (const b of dig) {
     if (signal.aborted) return failed(started, 'cancelled', 'cancelled');
     if (EMPTY.has(b.name)) continue;
     await bot.tool?.equipForBlock?.(b, {}).catch?.(() => {});
     if (!bot.canDigBlock(b)) return failed(started, 'missing_tool', `cannot dig ${b.name} here`);
     await bot.dig(b, true);
   }
-  await waitUntil(() => bot.entity.position.y <= feet.y - 1.9, 3000, signal);
+  await waitUntil(() => bot.entity.position.y <= feet.y - 2.9, 4000, signal);
   try {
-    await placeBlockAt(bot, seal, feet, 'side', { signal });
+    await placeBlockAt(bot, seal, feet.offset(0, -1, 0), 'side', { signal });
   } catch (err) {
     return failed(started, 'blocked', `dug in but could not seal the top: ${(err as Error).message}`);
   }
   const at = bot.entity.position.floored();
-  return done(started, `hid underground at ${at.x} ${at.y} ${at.z} and sealed the top with ${seal.name}; to come out go to ${feet.x} ${feet.y} ${feet.z}`, { [seal.name]: -1 });
+  await new Promise((r) => setTimeout(r, 500));
+  return done(started, `hid underground at ${at.x} ${at.y} ${at.z} and sealed the top with ${seal.name}; to come out go to ${feet.x} ${feet.y} ${feet.z}`, difference(before, counts(bot)));
 }
 
 /** 朝远离附近怪物的方向跑开 */

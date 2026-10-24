@@ -68,7 +68,7 @@ const ACTIONS: GameActionSpec[] = [
   { action: 'equip', description: '拿在手上，或者穿上盔甲', params: { name: '物品的英文 id' } },
   { action: 'drop', description: '把东西丢在地上（给别的玩家）', params: { name: '物品的英文 id', index: '数量（默认 1）' } },
   { action: 'pickup', description: '捡起附近地上的掉落物（后台做）' },
-  { action: 'hide', description: '原地往下挖两格钻进去、用一块方块（泥土、圆石、木板……）封住头顶，躲怪过夜；出来时 go 回原来的坐标（后台做）' },
+  { action: 'hide', description: '原地往下挖三格钻进去、用一块方块（泥土、圆石、木板……）封住头顶，躲怪过夜；出来时 go 回原来的坐标（后台做）' },
   { action: 'flee', description: '朝远离附近怪物的方向跑开十几格（后台做）' },
   { action: 'sleep', description: '睡觉跳过夜晚：附近有床就去睡，没有就放下背包里的床（只有晚上、附近没怪时能睡）（后台做）' },
   { action: 'chat', description: '在游戏的聊天栏里打字（游戏里的玩家才看得到；你回复里写的话是说出口的，不会进游戏聊天）', params: { text: '要发的话' } },
