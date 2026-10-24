@@ -16,7 +16,6 @@ import {
 } from './craftPlanner.js';
 import { gatherWood } from './gatherWood.js';
 import { fleeFromHostiles, hideUnderground, sleepInBed, swimToShore } from './survival.js';
-import { closeView, openView, setHud, type ViewOptions } from './viewer.js';
 import { placeBlockAt as airiPlaceBlockAt, breakBlockAt, isReplaceableForPlacement, type PlaceFace } from './placeBlock.js';
 import { Vec3 } from 'vec3';
 import { runAdaptiveCollection } from './collectionStrategy.js';
@@ -220,8 +219,6 @@ export function createMineflayerAdapter(
     stopFollowWatchdog();
   }
 
-  /** 网页画面的设置：开过一次，之后每次（重新）进服都自动开 */
-  let viewOptions: ViewOptions | undefined;
   let creeperPoller: ReturnType<typeof setInterval> | undefined;
   let lastCreeperAlert = 0;
   function stopCreeperWatch(): void {
@@ -719,7 +716,6 @@ export function createMineflayerAdapter(
       if (bot !== current) return;
       stopGazeTracking();
       stopCreeperWatch();
-      closeView();
       emit({
         kind: 'log',
         level: intentionalDisconnect ? 'info' : 'warn',
@@ -751,13 +747,6 @@ export function createMineflayerAdapter(
     notifyPlayers(current, emit, policyHandlers);
     startGazeTracking(current);
     startCreeperWatch(current);
-    if (viewOptions) {
-      try {
-        openView(current, viewOptions);
-      } catch (error) {
-        emit({ kind: 'log', level: 'warn', message: `[view] could not open: ${error instanceof Error ? error.message : String(error)}` });
-      }
-    }
   }
 
   async function collectBlocks(request: CollectionRequest): Promise<{
@@ -2365,16 +2354,6 @@ export function createMineflayerAdapter(
 
     swimToShore() {
       return swimToShore(requireBot(bot));
-    },
-
-    view(options) {
-      viewOptions = options;
-      openView(requireBot(bot), options);
-      return { url: `http://127.0.0.1:${options.port}` };
-    },
-
-    hud(lines) {
-      setHud(lines);
     },
 
     hudState() {

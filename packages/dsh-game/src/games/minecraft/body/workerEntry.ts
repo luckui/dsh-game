@@ -26,8 +26,6 @@ export interface WorkerController {
   executeAction(payload: MinecraftActionInstruction): Promise<unknown>;
   cancelAction(actionId: string): Promise<unknown>;
   follow(payload: any): Promise<unknown>;
-  view(payload: any): unknown;
-  hud(payload: any): unknown;
   hudState(): unknown;
   stop(): Promise<unknown>;
   taskRelease(): Promise<unknown>;
@@ -87,10 +85,6 @@ async function runCommand(
       return controller.cancelAction((command.payload as { actionId: string }).actionId);
     case 'follow':
       return controller.follow(command.payload);
-    case 'view':
-      return controller.view(command.payload);
-    case 'hud':
-      return controller.hud(command.payload);
     case 'hud-state':
       return controller.hudState();
     case 'stop':
@@ -536,13 +530,6 @@ export function createRuntimeWorkerController(
       adapter.setOwner(ownerPlayer);
       await resumeFollowing();
       return { state: 'following', player: ownerPlayer };
-    },
-    view(payload: { port: number; viewDistance: number }) {
-      return adapter.view(payload);
-    },
-    hud(payload: { lines: string[] }) {
-      adapter.hud(payload.lines);
-      return true;
     },
     hudState() {
       return adapter.hudState();

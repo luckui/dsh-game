@@ -74,8 +74,6 @@ export type LiveSource = { url: string } | { window: string; overlay?: string };
 export interface GameSession {
   readonly id: string;
   readonly title: string;
-  /** 游戏画面的网页地址（Minecraft 的网页 3D 画面）：有的话「游戏」标签页直接嵌进来 */
-  readonly viewUrl?: string | null;
   /** 游戏客户端的视角（Minecraft 摄像机：first 她的视角 / back 背后 / front 正面） */
   readonly perspective?: string;
   /** 切换游戏客户端的视角；返回 'ok' 或者做不到的原因 */

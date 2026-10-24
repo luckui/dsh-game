@@ -55,7 +55,6 @@ export const Config = z.object({
   mcJava: z.string().description('Java 21 的路径（不填就自动找 HMCL / 官方启动器带的）').volatile(),
   mcCameraName: z.string().default('DaFeiYuCam').description('摄像机在服务器里的名字').volatile(),
   mcHudPort: z.natural().default(7391).description('摄像机 HUD 网页的端口（血量、饱食度、快捷栏；直播时作为 OBS 浏览器源叠在游戏窗口上，0 = 不开）').volatile(),
-  mcViewPort: z.natural().default(0).description('（实验）网页 3D 画面的端口，0 = 不开').volatile(),
   mcRconPassword: z.string().role('secret').description('自己服务器的 RCON 密码（server.properties 里的 rcon.password）；填了的话，旁观模式的玩家会自动挂到她身上').volatile(),
 });
 
@@ -81,7 +80,6 @@ export function apply(ctx: HostContext, config: LiveConfig = {}): void {
     mcUsername: config.mcUsername?.get(),
     mcRconPort: config.mcRconPort?.get(),
     mcRconPassword: config.mcRconPassword?.get(),
-    mcViewPort: config.mcViewPort?.get(),
     mcCamera: config.mcCamera?.get(),
     mcClientDir: config.mcClientDir?.get(),
     mcJava: config.mcJava?.get(),

@@ -26,8 +26,6 @@ export interface MinecraftOptions {
   record: (event: RunEvent) => void;
   /** 她在游戏里做的事（给舞台终端显示） */
   onAction?: (text: string) => void;
-  /** 网页画面的端口（0 = 不开） */
-  viewPort: number;
   /** 摄像机客户端（真的 Minecraft 客户端，旁观模式挂在她身上）；null = 不开。要有 RCON 才能把它切成旁观 */
   camera?: { name: string; clientDir: string; java: string; gameDir: string; hudPort: number } | null;
   log?: (text: string) => void;
@@ -102,7 +100,6 @@ export class MinecraftSession implements GameSession {
   readonly id = 'minecraft';
   readonly title = 'Minecraft';
   readonly realtime = true;
-  viewUrl: string | null = null;
   readonly facts: string;
 
   private runtime: MinecraftRuntimeManager | null = null;
@@ -127,7 +124,6 @@ export class MinecraftSession implements GameSession {
   private disconnected = false;
   private lastDimension: string | null = null;
   private lastRespectate = 0;
-  private lastHud = '';
   private camera: CameraClient | null = null;
   private hudTimer: NodeJS.Timeout | null = null;
   private hudBusy = false;
@@ -174,17 +170,9 @@ export class MinecraftSession implements GameSession {
         companion: false,
       }, 60_000);
     } catch (err) {
-      return `进不了服务器 ${this.options.host}:${this.options.port}：${(err as Error).message}。主人要先开好服务器（Java 版 1.21.11）。`;
+      return `进不了服务器 ${this.options.host}:${this.options.port}：${(err as Error).message}。主人要先开好服务器（Java 版）。`;
     }
     this.disconnected = false;
-    if (this.options.viewPort) {
-      try {
-        const view = await runtime.command<{ url: string }>('view', { port: this.options.viewPort, viewDistance: 6 }, 15_000);
-        this.viewUrl = view.url;
-      } catch {
-        this.viewUrl = null;
-      }
-    }
     void this.startCamera();
     for (const p of this.status.players) if (p !== this.status.username && p !== this.cameraName) this.players.add(p);
     this.options.record({ type: 'start', game: 'minecraft' });
@@ -443,7 +431,6 @@ export class MinecraftSession implements GameSession {
     const moved = this.lastDimension !== null && dimension !== this.lastDimension;
     this.lastDimension = dimension;
     if (moved || Date.now() - this.lastRespectate >= RESPECTATE_MS) void this.attachSpectators();
-    void this.updateHud();
     void this.keepCameraAttached();
     // 新出现在 12 格内的敌对生物（同一只只报一次）
     for (const e of hostiles(s).filter((h) => h.distance <= 12)) {
@@ -553,21 +540,6 @@ export class MinecraftSession implements GameSession {
     const nums = reply.match(/-?\d+(\.\d+)?(?=d)/g)?.map(Number);
     const attached = nums && nums.length >= 3 && Math.hypot(nums[0] - me.x, nums[1] - me.y, nums[2] - me.z) < 2;
     if (!attached) await rcon(target, `spectate ${this.options.username} ${this.cameraName}`).catch(() => {});
-  }
-
-  /** 画面角落的信息条：在做什么、血量和饥饿、目标（变了才发） */
-  private async updateHud(): Promise<void> {
-    if (!this.viewUrl || !this.runtime) return;
-    const b = this.snapshot?.body;
-    const lines = [
-      this.running ? `正在${this.running.label}${this.queue.length ? `（后面还有 ${this.queue.length} 件）` : ''}` : '空闲',
-      ...(b ? [`❤ ${fmt1(b.health)}/20　🍖 ${Math.round(b.food)}/20　${phaseOf(this.snapshot?.world?.timeOfDay) ?? ''}`] : []),
-      ...(this.goal ? [`目标：${this.goal}`] : []),
-    ];
-    const key = JSON.stringify(lines);
-    if (key === this.lastHud) return;
-    this.lastHud = key;
-    await this.runtime.command('hud', { lines }, 5000).catch(() => {});
   }
 
   /** 把旁观模式的玩家挂到她身上（第一人称跟着她；F5 换第三人称）。没配 RCON 就什么都不做 */

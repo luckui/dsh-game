@@ -269,26 +269,6 @@ function GameScreen({ onLive }: { onLive: (live: boolean) => void }) {
   );
 }
 
-/** 游戏自己的网页画面（Minecraft）：默认她的视角，可切第三人称跟拍，也能在单独的浏览器窗口里看 */
-function WebScreen({ base, title }: { base: string; title: string }) {
-  const [mode, setMode] = useState<'first' | 'third'>(() => (localStorage.getItem('dsh-game.mc-view') === 'third' ? 'third' : 'first'));
-  const url = `${base.replace(/\/$/, '')}/${mode}/`;
-  const pick = (m: 'first' | 'third') => {
-    setMode(m);
-    try { localStorage.setItem('dsh-game.mc-view', m); } catch { /* 无痕模式 */ }
-  };
-  return (
-    <div className="dg-screen dg-screen-web">
-      <iframe key={url} src={url} title={`${title}画面`} />
-      <div className="dg-web-views">
-        <button className={mode === 'first' ? 'on' : ''} onClick={() => pick('first')}>她的视角</button>
-        <button className={mode === 'third' ? 'on' : ''} onClick={() => pick('third')}>第三人称</button>
-        <button onClick={() => window.open(url, 'dsh-game-view', 'width=1280,height=720')}>新窗口打开</button>
-      </div>
-    </div>
-  );
-}
-
 /** 画面在游戏客户端窗口里（Minecraft 摄像机）：说明 + 视角切换（往那个窗口发 F5，不用碰它） */
 function ClientScreen({ title, note, perspective }: { title: string; note: string; perspective: string | null }) {
   const [error, setError] = useState('');
@@ -386,8 +366,6 @@ export function GameView({ sessionId, events, send, stop, openSession }: GameTab
     screenBody = <ScreenNote title="没有进行中的游戏" text={text} action={{ label: '打开游戏库', run: () => openLibrary(closed?.game) }} />;
   } else if (showWolf) {
     screenBody = <div className="dg-screen dg-screen-wolf"><WolfTable colors={WOLF_COLORS} /></div>;
-  } else if (state?.view) {
-    screenBody = <WebScreen base={state.view} title={state.title ?? '游戏'} />;
   } else if (state?.note) {
     // 画面不在插件里（Minecraft：在摄像机客户端窗口里），给视角切换按钮
     screenBody = <ClientScreen title={state.title ?? '游戏'} note={state.note} perspective={state.perspective ?? null} />;
@@ -465,12 +443,6 @@ html[data-dsh-game-view][data-dsh-game-theater] header:has([data-conversation-ta
 .dg-client-views{display:flex;gap:6px;margin-top:10px}
 .dg-client-views .on{background:rgba(120,150,255,.85);color:#fff;border-color:transparent}
 .dg-client-error{color:#ff9aa8}
-.dg-screen-web{padding:0;overflow:hidden;position:relative}
-.dg-web-views{position:absolute;right:10px;top:10px;display:flex;gap:4px;opacity:.55;transition:opacity .15s}
-.dg-screen-web:hover .dg-web-views{opacity:1}
-.dg-web-views button{font:600 12px/1 system-ui,sans-serif;color:#e8ecff;background:rgba(10,14,28,.7);border:1px solid rgba(255,255,255,.18);border-radius:999px;padding:6px 10px;cursor:pointer}
-.dg-web-views button.on{background:rgba(120,150,255,.85);color:#fff;border-color:transparent}
-.dg-screen-web iframe{flex:1;width:100%;height:100%;border:0;display:block;background:#000}
 /* 全屏：画面铺满屏幕，游戏推流的画面按比例放，不拉伸 */
 .dg-screen-slot:fullscreen{background:#000}
 .dg-screen-slot:fullscreen > .dg-screen{border-radius:0;border:0}
