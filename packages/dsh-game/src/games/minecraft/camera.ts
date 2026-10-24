@@ -6,7 +6,7 @@
  *   - 摄像机有自己的游戏目录（DSH 主目录下），设置和主人自己玩的那份分开：失焦不暂停、不放背景音乐、跳过首次进入的引导
  *   - 开局后直接连服务器（--quickPlayMultiplayer）
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -121,6 +121,48 @@ export class CameraClient {
     }
     this.pid = child.pid ?? null;
     o.log?.(`[camera] started pid ${this.pid}`);
+    if (this.pid && process.platform === 'win32') this.keepOutOfTheWay(this.pid);
+  }
+
+  /**
+   * 摄像机窗口只是给人看的：设成「不可激活」（WS_EX_NOACTIVATE），点它不会抢焦点、不会把鼠标锁进游戏；
+   * 它刚打开时抢走的焦点还给原来的窗口。拖动窗口、OBS 抓画面都不受影响。
+   */
+  private keepOutOfTheWay(pid: number): void {
+    const script = `
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class CamWin {
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);
+  [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int i, int v);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e);
+}
+"@
+$prev = [CamWin]::GetForegroundWindow()
+$deadline = (Get-Date).AddSeconds(120)
+$h = [IntPtr]::Zero
+while ((Get-Date) -lt $deadline) {
+  $p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue
+  if (-not $p) { exit 1 }
+  if ($p.MainWindowHandle -ne 0 -and $p.MainWindowTitle -like 'Minecraft*') { $h = $p.MainWindowHandle; break }
+  Start-Sleep -Milliseconds 200
+}
+if ($h -eq [IntPtr]::Zero) { exit 1 }
+$ex = [CamWin]::GetWindowLong($h, -20)
+[CamWin]::SetWindowLong($h, -20, ($ex -bor 0x08000000)) | Out-Null
+for ($i = 0; $i -lt 40; $i++) {
+  if ([CamWin]::GetForegroundWindow() -eq $h -and $prev -ne [IntPtr]::Zero -and $prev -ne $h) {
+    [CamWin]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero); [CamWin]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+    [CamWin]::SetForegroundWindow($prev) | Out-Null
+  }
+  Start-Sleep -Milliseconds 500
+}
+`;
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    const ps = spawn('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], { windowsHide: true, stdio: 'ignore' });
+    ps.on('exit', (code) => this.options.log?.(`[camera] window set to no-activate (${code === 0 ? 'ok' : `exit ${code}`})`));
   }
 
   stop(): void {
