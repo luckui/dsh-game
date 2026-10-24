@@ -341,6 +341,9 @@ export function GameView({ sessionId, events, send, stop, openSession }: GameTab
     screenBody = <ScreenNote title="没有进行中的游戏" text={text} action={{ label: '打开游戏库', run: () => openLibrary(closed?.game) }} />;
   } else if (showWolf) {
     screenBody = <div className="dg-screen dg-screen-wolf"><WolfTable colors={WOLF_COLORS} /></div>;
+  } else if (state?.view) {
+    // 游戏自己有网页画面（Minecraft 的 3D 画面）：直接嵌进来，可以拖动转视角
+    screenBody = <div className="dg-screen dg-screen-web"><iframe src={state.view} title={`${state.title ?? '游戏'}画面`} /></div>;
   } else {
     screenBody = <GameScreen onLive={setLive} />;
   }
@@ -412,6 +415,8 @@ html[data-dsh-game-view][data-dsh-game-theater] header:has([data-conversation-ta
 .dg-layout[data-theater] .wt-hud-left,.dg-screen-slot:fullscreen .wt-hud-left{margin-top:40px}
 .dg-hover-bar .dg-live{font-size:10px}
 .dg-screen-slot > .dg-screen{flex:1}
+.dg-screen-web{padding:0;overflow:hidden}
+.dg-screen-web iframe{flex:1;width:100%;height:100%;border:0;display:block;background:#000}
 /* 全屏：画面铺满屏幕，游戏推流的画面按比例放，不拉伸 */
 .dg-screen-slot:fullscreen{background:#000}
 .dg-screen-slot:fullscreen > .dg-screen{border-radius:0;border:0}

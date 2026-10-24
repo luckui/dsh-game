@@ -26,6 +26,7 @@ export interface WorkerController {
   executeAction(payload: MinecraftActionInstruction): Promise<unknown>;
   cancelAction(actionId: string): Promise<unknown>;
   follow(payload: any): Promise<unknown>;
+  view(payload: any): unknown;
   stop(): Promise<unknown>;
   taskRelease(): Promise<unknown>;
 }
@@ -84,6 +85,8 @@ async function runCommand(
       return controller.cancelAction((command.payload as { actionId: string }).actionId);
     case 'follow':
       return controller.follow(command.payload);
+    case 'view':
+      return controller.view(command.payload);
     case 'stop':
       return controller.stop();
     case 'task-release':
@@ -519,6 +522,9 @@ export function createRuntimeWorkerController(
       adapter.setOwner(ownerPlayer);
       await resumeFollowing();
       return { state: 'following', player: ownerPlayer };
+    },
+    view(payload: { port: number; firstPerson: boolean; viewDistance: number }) {
+      return adapter.view(payload);
     },
     async stop(): Promise<void> {
       followEnabled = false;

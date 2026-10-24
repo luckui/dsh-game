@@ -25,6 +25,8 @@ export interface MinecraftOptions {
   record: (event: RunEvent) => void;
   /** 她在游戏里做的事（给舞台终端显示） */
   onAction?: (text: string) => void;
+  /** 网页画面的端口（0 = 不开） */
+  viewPort: number;
   /** 自己服务器的 RCON：有的话，旁观的玩家会被自动挂到她身上（她复活、换维度、对方被甩开时重新挂） */
   rcon?: RconTarget | null;
 }
@@ -92,6 +94,7 @@ export class MinecraftSession implements GameSession {
   readonly id = 'minecraft';
   readonly title = 'Minecraft';
   readonly realtime = true;
+  viewUrl: string | null = null;
   readonly facts: string;
 
   private runtime: MinecraftRuntimeManager | null = null;
@@ -148,6 +151,14 @@ export class MinecraftSession implements GameSession {
       return `进不了服务器 ${this.options.host}:${this.options.port}：${(err as Error).message}。主人要先开好服务器（Java 版 1.21.11）。`;
     }
     this.disconnected = false;
+    if (this.options.viewPort) {
+      try {
+        const view = await runtime.command<{ url: string }>('view', { port: this.options.viewPort, firstPerson: false, viewDistance: 6 }, 15_000);
+        this.viewUrl = view.url;
+      } catch {
+        this.viewUrl = null;
+      }
+    }
     for (const p of this.status.players) if (p !== this.status.username) this.players.add(p);
     this.options.record({ type: 'start', game: 'minecraft' });
     await this.refresh();

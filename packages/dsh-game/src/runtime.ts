@@ -54,8 +54,10 @@ export interface Settings {
   /** 自己服务器的 RCON 端口和密码（密码空 = 不用）：旁观的主人自动挂到她身上 */
   mcRconPort: number;
   mcRconPassword: string;
+  /** Minecraft 网页画面的端口（0 = 不开） */
+  mcViewPort: number;
 }
-const DEFAULT_SETTINGS: Settings = { voice: DEFAULT_VOICE, censor: true, director: true, summaryModel: 'deepseek-official/deepseek-flash', ddlcDir: '', wolfModel: 'deepseek-official/deepseek-flash', wolfSeats: '', mcHost: '127.0.0.1', mcPort: 25565, mcUsername: 'DaFeiYu', mcRconPort: 25575, mcRconPassword: '' };
+const DEFAULT_SETTINGS: Settings = { voice: DEFAULT_VOICE, censor: true, director: true, summaryModel: 'deepseek-official/deepseek-flash', ddlcDir: '', wolfModel: 'deepseek-official/deepseek-flash', wolfSeats: '', mcHost: '127.0.0.1', mcPort: 25565, mcUsername: 'DaFeiYu', mcRconPort: 25575, mcRconPassword: '', mcViewPort: 3077 };
 
 /** 插件配置的读取方式：根插件 apply 时接上配置（插件页改了立刻生效，每次用时现读） */
 let readSettings: () => Partial<Settings> = () => ({});
@@ -360,6 +362,7 @@ export const GAMES = {
       host: settings.mcHost,
       port: Number(settings.mcPort) || 25565,
       username: settings.mcUsername,
+      viewPort: Number(settings.mcViewPort) || 0,
       rcon: settings.mcRconPassword ? { host: settings.mcHost, port: Number(settings.mcRconPort) || 25575, password: settings.mcRconPassword } : null,
       record,
       onAction: (text) => broadcast({ type: 'act', text, at: Date.now() }),
@@ -384,6 +387,8 @@ export interface GameState {
   owner: string | null;
   /** 上一局是怎么关掉的（没有游戏时显示给主人） */
   closed: { game: string; title: string; owner: string | null; reason: 'owner' | 'replaced'; note?: string } | null;
+  /** 游戏画面的网页地址（有的话「游戏」标签页嵌进来） */
+  view?: string | null;
 }
 
 let current: GameSession | null = null;
@@ -407,7 +412,7 @@ export const games = {
   },
   state(): GameState {
     if (!current) return { status: 'none', game: lastClosed?.game ?? null, title: lastClosed?.title ?? null, owner: null, closed: lastClosed };
-    return { status: current.finished ? 'finished' : paused ? 'paused' : 'running', game: current.id, title: current.title, owner: currentOwner, closed: null };
+    return { status: current.finished ? 'finished' : paused ? 'paused' : 'running', game: current.id, title: current.title, owner: currentOwner, closed: null, view: current.viewUrl ?? null };
   },
   /** 上一局是怎么关掉的 */
   get closed(): GameState['closed'] {

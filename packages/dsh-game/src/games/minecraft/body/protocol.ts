@@ -9,6 +9,7 @@ export type MinecraftAction =
   | 'cancel-action'
   | 'task-release'
   | 'follow'
+  | 'view'
   | 'stop';
 
 export type {

@@ -71,6 +71,8 @@ export interface Moment {
 export interface GameSession {
   readonly id: string;
   readonly title: string;
+  /** 游戏画面的网页地址（Minecraft 的网页 3D 画面）：有的话「游戏」标签页直接嵌进来 */
+  readonly viewUrl?: string | null;
   /** 实时游戏（Minecraft）：世界不会停下来等她，她说话的同时身体就开始动 */
   readonly realtime?: boolean;
   /** 游戏背景和规则（事实），game_start 时交给 agent */
