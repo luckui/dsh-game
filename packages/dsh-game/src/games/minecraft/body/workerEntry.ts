@@ -28,6 +28,7 @@ export interface WorkerController {
   follow(payload: any): Promise<unknown>;
   view(payload: any): unknown;
   hud(payload: any): unknown;
+  hudState(): unknown;
   stop(): Promise<unknown>;
   taskRelease(): Promise<unknown>;
 }
@@ -90,6 +91,8 @@ async function runCommand(
       return controller.view(command.payload);
     case 'hud':
       return controller.hud(command.payload);
+    case 'hud-state':
+      return controller.hudState();
     case 'stop':
       return controller.stop();
     case 'task-release':
@@ -540,6 +543,9 @@ export function createRuntimeWorkerController(
     hud(payload: { lines: string[] }) {
       adapter.hud(payload.lines);
       return true;
+    },
+    hudState() {
+      return adapter.hudState();
     },
     async stop(): Promise<void> {
       followEnabled = false;

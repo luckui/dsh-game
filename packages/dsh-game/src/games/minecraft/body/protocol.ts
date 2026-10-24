@@ -11,6 +11,7 @@ export type MinecraftAction =
   | 'follow'
   | 'view'
   | 'hud'
+  | 'hud-state'
   | 'stop';
 
 export type {

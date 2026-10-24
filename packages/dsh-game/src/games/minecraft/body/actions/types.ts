@@ -3,6 +3,7 @@ import type {
   MinecraftActionName,
   MinecraftActionResult,
   MinecraftEnvironmentSnapshot,
+  MinecraftHudState,
 } from '../contracts.js';
 import type { MinecraftRawObservation, MinecraftStatus } from '../protocol.js';
 import type { PathfindResult } from '../patchedGoto.js';
@@ -82,6 +83,8 @@ export interface MinecraftBodyAdapter {
   view(options: { port: number; viewDistance: number }): { url: string };
   /** 画面角落的信息条（一行一件） */
   hud(lines: string[]): void;
+  /** 原版 HUD 上的东西：血、饱食度、盔甲、氧气、经验、快捷栏（摄像机窗口上的 HUD 层用） */
+  hudState(): MinecraftHudState | null;
   /** 苦力怕反射：躲开附近的苦力怕（跑开约 8 格） */
   evadeCreeper(signal: AbortSignal): Promise<MinecraftActionResult>;
   flee(signal: AbortSignal): Promise<MinecraftActionResult>;

@@ -139,3 +139,28 @@ export type MinecraftWorkerCommand =
   | { type: 'execute-action'; requestId: string; instruction: MinecraftActionInstruction }
   | { type: 'cancel-action'; requestId: string; actionId: string }
   | { type: 'task-release'; requestId: string };
+
+/** 快捷栏里的一格：物品名、数量、耐久（用掉多少 / 一共多少，没有耐久就不带） */
+export interface MinecraftHudItem {
+  name: string;
+  count: number;
+  damage?: number;
+  maxDamage?: number;
+}
+
+/** 原版 HUD 上的东西 */
+export interface MinecraftHudState {
+  health: number;
+  food: number;
+  /** 盔甲值（0–20） */
+  armor: number;
+  /** 氧气（0–20，满了不显示） */
+  oxygen: number;
+  level: number;
+  /** 当前等级的经验进度（0–1） */
+  progress: number;
+  /** 手上拿的是快捷栏第几格（0–8） */
+  selected: number;
+  hotbar: (MinecraftHudItem | null)[];
+  offhand: MinecraftHudItem | null;
+}

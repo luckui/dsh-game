@@ -11,7 +11,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { GameAction, GameActionSpec, GameSession, Moment, RunEvent } from '../types.js';
-import type { MinecraftActionResult, MinecraftEnvironmentSnapshot, MinecraftObservedEntity } from './body/contracts.js';
+import type { MinecraftActionResult, MinecraftEnvironmentSnapshot, MinecraftHudState, MinecraftObservedEntity } from './body/contracts.js';
 import type { MinecraftRuntimeEvent, MinecraftStatus } from './body/protocol.js';
 import { MinecraftRuntimeManager } from './body/runtimeManager.js';
 import { rcon, type RconTarget } from './rcon.js';
@@ -51,6 +51,8 @@ interface Running {
 }
 
 const POLL_MS = 2000;
+/** 摄像机窗口上的 HUD 多久刷新一次 */
+const HUD_MS = 250;
 /** 什么都没发生时，game_continue 最多等多久就回来给她看一眼现状 */
 const IDLE_MAX_MS = 120_000;
 
@@ -127,6 +129,8 @@ export class MinecraftSession implements GameSession {
   private lastRespectate = 0;
   private lastHud = '';
   private camera: CameraClient | null = null;
+  private hudTimer: NodeJS.Timeout | null = null;
+  private hudBusy = false;
   /** 摄像机的人称（F5 三档循环：她的视角 → 背后 → 正面）；新开的客户端是她的视角 */
   perspective: 'first' | 'back' | 'front' = 'first';
   private cameraSeen = false;
@@ -331,6 +335,8 @@ export class MinecraftSession implements GameSession {
     this.poller = null;
     this.unsubscribe?.();
     this.unsubscribe = null;
+    if (this.hudTimer) clearInterval(this.hudTimer);
+    this.hudTimer = null;
     this.camera?.stop();
     this.camera = null;
     const runtime = this.runtime;
@@ -486,10 +492,24 @@ export class MinecraftSession implements GameSession {
     this.cameraNote = `摄像机客户端（${cam.name}，Minecraft ${version}）正在打开，进服后会自动挂到她身上。`;
     try {
       await this.camera.start();
+      this.hudTimer ??= setInterval(() => void this.pushHud(), HUD_MS);
       this.cameraNote = `她的画面在摄像机客户端窗口里（${cam.name}，跟着她的视角）。直播时 OBS 抓这个窗口。`;
     } catch (err) {
       this.camera = null;
       this.cameraNote = `摄像机客户端没开起来：${(err as Error).message}`;
+    }
+  }
+
+  /** 摄像机挂在她身上时，窗口上的 HUD 画她的血、饱食度、快捷栏 */
+  private async pushHud(): Promise<void> {
+    const camera = this.camera;
+    if (!camera?.running || !this.cameraSeen || !this.runtime || this.disconnected || this.hudBusy) return;
+    this.hudBusy = true;
+    try {
+      const state = await this.runtime.command<MinecraftHudState | null>('hud-state', {}, 2000).catch(() => null);
+      if (state) camera.showHud(state);
+    } finally {
+      this.hudBusy = false;
     }
   }
 

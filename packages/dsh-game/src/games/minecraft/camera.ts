@@ -10,7 +10,9 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import zlib from 'node:zlib';
+import type { MinecraftHudState } from './body/contracts.js';
+import { GameJar } from './gameJar.js';
+import { HudOverlay } from './hudOverlay.js';
 
 export interface CameraOptions {
   /** 装好游戏的 .minecraft（里面有 versions/<版本>/） */
@@ -89,38 +91,20 @@ function writeOptions(gameDir: string, root: string, version: string): void {
   fs.writeFileSync(file, [...Object.entries(ours).map(([k, v]) => `${k}:${v}`), ...keep].join('\n') + '\n');
 }
 
-/** 游戏 jar（zip）里 version.json 的 world_version：从中央目录找到它，只解压这一个文件 */
+/** 游戏 jar 里 version.json 的 world_version */
 function readDataVersion(jar: string): number | null {
   try {
-    const buf = fs.readFileSync(jar);
-    const eocd = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
-    if (eocd < 0) return null;
-    const count = buf.readUInt16LE(eocd + 10);
-    let p = buf.readUInt32LE(eocd + 16);
-    for (let i = 0; i < count; i++) {
-      const method = buf.readUInt16LE(p + 10);
-      const size = buf.readUInt32LE(p + 20);
-      const nameLen = buf.readUInt16LE(p + 28);
-      const extraLen = buf.readUInt16LE(p + 30);
-      const commentLen = buf.readUInt16LE(p + 32);
-      const local = buf.readUInt32LE(p + 42);
-      if (buf.toString('utf8', p + 46, p + 46 + nameLen) === 'version.json') {
-        const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
-        const raw = buf.subarray(start, start + size);
-        const text = method === 8 ? zlib.inflateRawSync(raw).toString('utf8') : raw.toString('utf8');
-        return Number(JSON.parse(text).world_version) || null;
-      }
-      p += 46 + nameLen + extraLen + commentLen;
-    }
+    return Number(new GameJar(jar).json('version.json')?.world_version) || null;
   } catch {
     // 读不到就不写版本号
+    return null;
   }
-  return null;
 }
 
 export class CameraClient {
   private pid: number | null = null;
   private closed = false;
+  private hud: HudOverlay | null = null;
 
   constructor(private readonly options: CameraOptions) {}
 
@@ -140,6 +124,8 @@ export class CameraClient {
     launcher.on('close', (code: unknown) => {
       o.log?.(`[camera] client closed (${String(code)})`);
       this.pid = null;
+      this.hud?.stop();
+      this.hud = null;
     });
     const child = await launcher.launch({
       root: o.root,
@@ -158,7 +144,20 @@ export class CameraClient {
     }
     this.pid = child.pid ?? null;
     o.log?.(`[camera] started pid ${this.pid}`);
-    if (this.pid && process.platform === 'win32') this.keepOutOfTheWay(this.pid);
+    if (this.pid && process.platform === 'win32') {
+      this.keepOutOfTheWay(this.pid);
+      try {
+        this.hud = new HudOverlay(path.join(o.root, 'versions', o.version, `${o.version}.jar`), path.join(o.gameDir, 'hud'), o.log);
+        this.hud.start(this.pid);
+      } catch (err) {
+        o.log?.(`[camera] no HUD overlay: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  /** 摄像机窗口上的 HUD 画她现在的状态 */
+  showHud(state: MinecraftHudState): void {
+    this.hud?.update(state);
   }
 
   /**
@@ -232,6 +231,8 @@ for ($i = 0; $i -lt ${times}; $i++) {
 
   stop(): void {
     this.closed = true;
+    this.hud?.stop();
+    this.hud = null;
     this.killPid(this.pid);
     this.pid = null;
   }

@@ -2377,6 +2377,27 @@ export function createMineflayerAdapter(
       setHud(lines);
     },
 
+    hudState() {
+      if (!bot?.entity) return null;
+      const slots: any[] = bot.inventory?.slots ?? [];
+      const item = (i: any) => {
+        if (!i) return null;
+        const max = Number(i.maxDurability) || 0;
+        return { name: i.name, count: i.count, ...(max ? { damage: Number(i.durabilityUsed) || 0, maxDamage: max } : {}) };
+      };
+      return {
+        health: Number(bot.health ?? 0),
+        food: Number(bot.food ?? 0),
+        armor: [5, 6, 7, 8].reduce((sum, s) => sum + armorPoints(slots[s]?.name), 0),
+        oxygen: Number(bot.oxygenLevel ?? 20),
+        level: Number(bot.experience?.level ?? 0),
+        progress: Number(bot.experience?.progress ?? 0),
+        selected: Number(bot.quickBarSlot ?? 0),
+        hotbar: Array.from({ length: 9 }, (_, i) => item(slots[36 + i])),
+        offhand: item(slots[45]),
+      };
+    },
+
     async evadeCreeper(signal) {
       const current = requireBot(bot);
       await current.pvp?.stop?.();
@@ -3641,4 +3662,23 @@ function abortError(): Error {
   const error = new Error('Minecraft collection cancelled');
   error.name = 'AbortError';
   return error;
+}
+
+/** 原版盔甲值：头盔、胸甲、护腿、靴子各加几点 */
+const ARMOR_POINTS: Record<string, [number, number, number, number]> = {
+  leather: [1, 3, 2, 1],
+  chainmail: [2, 5, 4, 1],
+  iron: [2, 6, 5, 2],
+  golden: [2, 5, 3, 1],
+  diamond: [3, 8, 6, 3],
+  netherite: [3, 8, 6, 3],
+};
+const ARMOR_PIECES = ['helmet', 'chestplate', 'leggings', 'boots'];
+
+function armorPoints(name: string | undefined): number {
+  if (!name) return 0;
+  if (name === 'turtle_helmet') return 2;
+  const [material, piece] = name.split('_');
+  const index = ARMOR_PIECES.indexOf(piece);
+  return index >= 0 ? (ARMOR_POINTS[material]?.[index] ?? 0) : 0;
 }
