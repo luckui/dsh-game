@@ -16,6 +16,7 @@ import {
 } from './craftPlanner.js';
 import { gatherWood } from './gatherWood.js';
 import { fleeFromHostiles, hideUnderground, sleepInBed, swimToShore } from './survival.js';
+import { buildStructure } from './build.js';
 import { placeBlockAt as airiPlaceBlockAt, breakBlockAt, isInteractive, isReplaceableForPlacement, type PlaceFace } from './placeBlock.js';
 import { Vec3 } from 'vec3';
 import { runAdaptiveCollection } from './collectionStrategy.js';
@@ -2412,6 +2413,38 @@ export function createMineflayerAdapter(
 
     swimToShore() {
       return swimToShore(requireBot(bot));
+    },
+
+    checkBlocks(names) {
+      const current = requireBot(bot);
+      const out: Record<string, string> = {};
+      for (const name of names) {
+        if (current.registry?.blocksByName?.[name] && current.registry?.itemsByName?.[name]) continue;
+        out[name] = current.registry?.blocksByName?.[name]
+          ? `${name} is a block but not an item you can hold and place`
+          : unknownNameText(current, name);
+      }
+      return out;
+    },
+
+    async buildStructure(options) {
+      const current = requireBot(bot);
+      return buildStructure(current, options, {
+        place: async (item, target) => { await placeBlockAt(current, item, target, 'auto', options.signal); },
+        dig: async (target) => {
+          if (current.entity.position.distanceTo(target.offset(0.5, 0.5, 0.5)) > 4) {
+            const r = await patchedGoto(current, new goals.GoalNear(target.x, target.y, target.z, 3), { signal: options.signal });
+            if (!r.ok) throw new Error(r.message);
+          }
+          const b = current.blockAt(target);
+          if (!b || isReplaceableForPlacement(b)) return;
+          await current.tool?.equipForBlock?.(b, {}).catch?.(() => {});
+          await current.dig(b, true);
+        },
+        pickup: async (radius) => { await collectItemDrops(radius, options.signal); },
+        progress: (text) => emit({ kind: 'build-progress', text }),
+        log: (text) => emit({ kind: 'log', level: 'warn', message: text }),
+      });
     },
 
     async closeStrayWindow() {

@@ -15,7 +15,7 @@ import { MinecraftSession } from '../src/games/minecraft/session.js';
 import { rcon as rconRaw, type RconTarget } from '../src/games/minecraft/rcon.js';
 
 const ROOT = path.resolve(process.argv[2] ?? '.');
-/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量）、不填 = 全部 */
+/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量）、build（盖房子）、不填 = 全部 */
 const SUITE = process.argv[3] ?? 'all';
 const props = Object.fromEntries(
   fs.readFileSync(path.join(ROOT, '.mc-server', 'server.properties'), 'utf8').split(/\r?\n/)
@@ -113,7 +113,7 @@ function reportedDelta(line: string): Record<string, number> {
 async function step(
   action: string,
   args: { name?: string; index?: number; text?: string },
-  expect: { ok?: RegExp; gain?: Record<string, number>; atLeast?: Record<string, number>; noDrops?: boolean } = {},
+  expect: { ok?: RegExp; gain?: Record<string, number>; atLeast?: Record<string, number>; noDrops?: boolean; timeoutMs?: number } = {},
 ): Promise<string> {
   await onArena();
   const watch = [...new Set([...Object.keys(expect.gain ?? {}), ...Object.keys(expect.atLeast ?? {})])];
@@ -121,7 +121,7 @@ async function step(
   const inv0 = await bodyInventory();
   for (const n of [...new Set([...Object.keys(inv0), ...watch])]) before[n] = await serverCount(n);
   const dropsBefore = expect.noDrops ? await droppedNearby() : 0;
-  const line = await act(action, args);
+  const line = await act(action, args, expect.timeoutMs);
   await sleep(800);
   check((expect.ok ?? /做完了/).test(line), `结果：${(expect.ok ?? /做完了/).source}`);
   const reported = reportedDelta(line);
@@ -299,6 +299,107 @@ async function edgeCases(): Promise<void> {
   await step('collect', { name: 'oak_log', index: 4 }, { atLeast: { oak_log: 4 } });
 }
 
+/** 图纸里每块方块在世界里是不是对的（用 RCON 的 execute if block 逐块问）：返回不对的那些 */
+async function wrongBlocks(text: string, origin: { x: number; y: number; z: number }): Promise<string[]> {
+  const { parseBlueprint, placements } = await import('../src/games/minecraft/blueprint.js');
+  const bp = parseBlueprint(text).blueprint!;
+  const wrong: string[] = [];
+  for (const p of placements(bp, origin)) {
+    const state = Object.entries(p.props).map(([k, v]) => `${k}=${v}`).join(',');
+    const reply = await rcon(`execute if block ${p.x} ${p.y} ${p.z} ${p.name}${state ? `[${state}]` : ''}`);
+    if (!/passed/i.test(reply)) wrong.push(`${p.name}${state ? `[${state}]` : ''} @ ${p.x} ${p.y} ${p.z}`);
+  }
+  return wrong;
+}
+
+/** 某个范围里不在图纸上的泥土、圆石（脚手架没拆干净） */
+async function leftovers(box: { x1: number; y1: number; z1: number; x2: number; y2: number; z2: number }, keep: Set<string>): Promise<string[]> {
+  const left: string[] = [];
+  for (let x = box.x1; x <= box.x2; x++) for (let y = box.y1; y <= box.y2; y++) for (let z = box.z1; z <= box.z2; z++) {
+    if (keep.has(`${x},${y},${z}`)) continue;
+    const reply = await rcon(`execute if block ${x} ${y} ${z} #minecraft:dirt`);
+    const cobble = await rcon(`execute if block ${x} ${y} ${z} cobblestone`);
+    if (/passed/i.test(reply) || /passed/i.test(cobble)) left.push(`${x} ${y} ${z}`);
+  }
+  return left;
+}
+
+/** 盖房子：图纸、参考图纸、材料、朝向、脚手架 */
+async function buildCases(): Promise<void> {
+  const { TEMPLATES, parseBlueprint, placements } = await import('../src/games/minecraft/blueprint.js');
+  // 场地里面清空，墙和顶加高（塔有 8 层）
+  await rcon(`fill ${X - 9} ${Y + 1} ${Z - 9} ${X + 9} ${Y + 10} ${Z + 9} air`);
+  await rcon(`fill ${X - 10} ${Y + 7} ${Z - 10} ${X + 10} ${Y + 7} ${Z + 10} air replace glass`);
+  for (const [a, b] of [[`${X - 10} ${Y + 1} ${Z - 10}`, `${X + 10} ${Y + 10} ${Z - 10}`], [`${X - 10} ${Y + 1} ${Z + 10}`, `${X + 10} ${Y + 10} ${Z + 10}`], [`${X - 10} ${Y + 1} ${Z - 10}`, `${X - 10} ${Y + 10} ${Z + 10}`], [`${X + 10} ${Y + 1} ${Z - 10}`, `${X + 10} ${Y + 10} ${Z + 10}`]]) {
+    await rcon(`fill ${a} ${b} glass`);
+  }
+  await rcon(`fill ${X - 10} ${Y + 11} ${Z - 10} ${X + 10} ${Y + 11} ${Z + 10} glass`);
+  await reset();
+  await rcon(`tp ${NAME} ${X} ${Y + 1} ${Z}`);
+  await sleep(1500);
+
+  begin('图纸：方块名写错、字符没在图例里');
+  const badName = await session.act({ action: 'design', name: '错的', text: '图例：\n# oak_plank\n第1层：\n###\n#X#' });
+  note(badName.slice(0, 300));
+  check(/X/.test(badName) && !/存好了/.test(badName), '字符不在图例里：读不了，说出是哪个字符');
+  const badName2 = await session.act({ action: 'design', name: '错的2', text: '图例：\n# oak_plank\n第1层：\n###' });
+  note(badName2.slice(0, 300));
+  check(/oak_planks/.test(badName2) && !/存好了/.test(badName2), '方块名写错：不存，列出相近的名字（oak_planks）');
+
+  begin('参考图纸：小木屋，材料不够时说清缺多少');
+  const tpl = await session.act({ action: 'template', name: 'cabin' });
+  note(tpl.split('\n').slice(-12).join(' | ').slice(0, 400));
+  check(/149 块/.test(tpl) && /存好了/.test(tpl), '参考图纸给了预览（149 块）并存好了');
+  const cabinOrigin = { x: X - 8, y: Y + 1, z: Z - 8 };
+  const poor = await act('build', { name: 'cabin', text: `${cabinOrigin.x} ${cabinOrigin.y} ${cabinOrigin.z}` });
+  check(/没成/.test(poor) && /oak_planks/.test(poor), `材料不够：不开工，说清缺什么（${poor.slice(0, 120)}）`);
+
+  begin('盖小木屋（参考图纸，149 块）');
+  await rcon(`give ${NAME} oak_planks 140`);
+  await rcon(`give ${NAME} oak_log 12`);
+  await rcon(`give ${NAME} glass_pane 4`);
+  await rcon(`give ${NAME} oak_door 1`);
+  await rcon(`give ${NAME} cobblestone 64`);
+  await sleep(1000);
+  const cabin = await step('build', { name: 'cabin', text: `${cabinOrigin.x} ${cabinOrigin.y} ${cabinOrigin.z}` }, { ok: /：做完了/, timeoutMs: 600_000 });
+  note(`她看到的：${cabin.slice(0, 300)}`);
+  const cabinWrong = await wrongBlocks(TEMPLATES.cabin.text, cabinOrigin);
+  check(cabinWrong.length === 0, `每块都对（不对的 ${cabinWrong.length} 块：${cabinWrong.slice(0, 5).join('；')}）`);
+  const cabinKeep = new Set(placements(parseBlueprint(TEMPLATES.cabin.text).blueprint!, cabinOrigin).map((p) => `${p.x},${p.y},${p.z}`));
+  const cabinLeft = await leftovers({ x1: cabinOrigin.x - 2, y1: Y + 1, z1: cabinOrigin.z - 2, x2: cabinOrigin.x + 8, y2: Y + 8, z2: cabinOrigin.z + 7 }, cabinKeep);
+  check(cabinLeft.length === 0, `脚手架拆干净了（还剩 ${cabinLeft.length} 块：${cabinLeft.slice(0, 5).join('；')}）`);
+
+  begin('盖瞭望塔（8 层高，要垫方块爬上去，盖完拆脚手架）');
+  await session.act({ action: 'template', name: 'tower' });
+  await reset();
+  await rcon(`give ${NAME} cobblestone 192`);
+  await rcon(`give ${NAME} dirt 32`);
+  await rcon(`give ${NAME} oak_door 1`);
+  await sleep(1000);
+  const towerOrigin = { x: X + 2, y: Y + 1, z: Z + 2 };
+  const tower = await step('build', { name: 'tower', text: `${towerOrigin.x} ${towerOrigin.y} ${towerOrigin.z}` }, { ok: /：做完了/, timeoutMs: 600_000 });
+  note(`她看到的：${tower.slice(0, 300)}`);
+  const towerWrong = await wrongBlocks(TEMPLATES.tower.text, towerOrigin);
+  check(towerWrong.length === 0, `每块都对（不对的 ${towerWrong.length} 块：${towerWrong.slice(0, 5).join('；')}）`);
+  const towerKeep = new Set(placements(parseBlueprint(TEMPLATES.tower.text).blueprint!, towerOrigin).map((p) => `${p.x},${p.y},${p.z}`));
+  const towerLeft = await leftovers({ x1: towerOrigin.x - 3, y1: Y + 1, z1: towerOrigin.z - 3, x2: towerOrigin.x + 7, y2: Y + 10, z2: towerOrigin.z + 7 }, towerKeep);
+  check(towerLeft.length === 0, `脚手架拆干净了（还剩 ${towerLeft.length} 块：${towerLeft.slice(0, 5).join('；')}）`);
+
+  begin('楼梯的朝向（四个方向各一级）');
+  const stairs = '图例：\n# cobblestone\nN oak_stairs facing=north\nE oak_stairs facing=east\nS oak_stairs facing=south\nW oak_stairs facing=west\n第1层：\n#####\n#N#E#\n#####\n#S#W#\n#####';
+  const designed = await session.act({ action: 'design', name: '楼梯', text: stairs });
+  check(/存好了/.test(designed), '楼梯图纸存好了');
+  await reset();
+  await rcon(`give ${NAME} cobblestone 32`);
+  await rcon(`give ${NAME} oak_stairs 8`);
+  await sleep(1000);
+  const stairsOrigin = { x: X - 8, y: Y + 1, z: Z + 3 };
+  const stairsLine = await step('build', { name: '楼梯', text: `${stairsOrigin.x} ${stairsOrigin.y} ${stairsOrigin.z}` }, { ok: /：做完了/ });
+  note(`她看到的：${stairsLine.slice(0, 300)}`);
+  const stairsWrong = await wrongBlocks(stairs, stairsOrigin);
+  check(stairsWrong.length === 0, `朝向都对（不对的：${stairsWrong.join('；')}）`);
+}
+
 async function reset(): Promise<void> {
   await rcon(`clear ${NAME}`);
   await rcon(`effect clear ${NAME}`);
@@ -322,8 +423,9 @@ async function main(): Promise<void> {
     await rcon(`kill @e[type=!player,x=${X},y=${Y},z=${Z},distance=..40]`);
     await reset();
     await sleep(2000);
-    if (SUITE !== 'edge') await basicCases();
-    if (SUITE !== 'basic') await edgeCases();
+    if (SUITE === 'all' || SUITE === 'basic') await basicCases();
+    if (SUITE === 'all' || SUITE === 'edge') await edgeCases();
+    if (SUITE === 'all' || SUITE === 'build') await buildCases();
   } finally {
     await session.stop().catch(() => {});
     await rcon(`forceload remove ${X - 16} ${Z - 16} ${X + 16} ${Z + 16}`);

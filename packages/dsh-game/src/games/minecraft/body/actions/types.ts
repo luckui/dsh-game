@@ -7,6 +7,7 @@ import type {
 } from '../contracts.js';
 import type { MinecraftRawObservation, MinecraftStatus } from '../protocol.js';
 import type { PathfindResult } from '../patchedGoto.js';
+import type { BuildBlock } from '../build.js';
 
 export interface MinecraftConnectionOptions {
   host: string;
@@ -81,6 +82,10 @@ export interface MinecraftBodyAdapter {
   hide(signal: AbortSignal): Promise<MinecraftActionResult>;
   /** 原版 HUD 上的东西：血、饱食度、盔甲、氧气、经验、快捷栏（摄像机窗口上的 HUD 层用） */
   hudState(): MinecraftHudState | null;
+  /** 这些名字里哪些不是这个版本能放的方块：名字 → 说明（附相近的名字） */
+  checkBlocks(names: string[]): Record<string, string>;
+  /** 照图纸盖房子（见 build.ts） */
+  buildStructure(options: { label: string; blocks: BuildBlock[]; clear: { x: number; y: number; z: number }[]; signal: AbortSignal }): Promise<MinecraftActionResult>;
   /** 还开着的界面（熔炉、箱子、工作台……）关掉，鼠标上拿着的东西先放回背包 */
   closeStrayWindow(): Promise<void>;
   /** 苦力怕反射：躲开附近的苦力怕（跑开约 8 格） */

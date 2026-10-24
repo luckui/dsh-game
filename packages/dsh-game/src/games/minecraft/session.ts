@@ -16,6 +16,7 @@ import type { MinecraftRuntimeEvent, MinecraftStatus } from './body/protocol.js'
 import { MinecraftRuntimeManager } from './body/runtimeManager.js';
 import { rcon, type RconTarget } from './rcon.js';
 import { CameraClient, findJava, findMinecraftRoot } from './camera.js';
+import { TEMPLATES, clearCells, describeBlueprint, materials, parseBlueprint, placements, type Blueprint } from './blueprint.js';
 
 export interface MinecraftOptions {
   /** 打包好的身体子进程（lib/minecraft-worker.cjs） */
@@ -73,11 +74,14 @@ const ACTIONS: GameActionSpec[] = [
   { action: 'hide', description: '原地往下挖三格钻进去、用一块方块（泥土、圆石、木板……）封住头顶，躲怪过夜；出来时 go 回原来的坐标（后台做）' },
   { action: 'flee', description: '朝远离附近怪物的方向跑开十几格（后台做）' },
   { action: 'sleep', description: '睡觉跳过夜晚：附近有床就去睡，没有就放下背包里的床（只有晚上、附近没怪时能睡）（后台做）' },
+  { action: 'template', description: `看一张常见建筑的参考图纸（存成同名图纸：可以直接 build，也可以照着改了再 design）：${Object.entries(TEMPLATES).map(([id, t]) => `${id}（${t.title}）`).join('、')}`, params: { name: '参考图纸的名字' } },
+  { action: 'design', description: '交一张自己画的图纸，看它的正面、侧面、俯视三张投影、材料清单和问题（不会动手盖）。格式：先写「图例：」，每行「字符 方块的英文 id」，楼梯、门这类可以跟 facing=north/south/east/west（放的时候人朝哪边）、half=top/bottom；再写「第1层：」「第2层：」……从下往上一层层画。每层第一行在最北边，往下一行往南一格；每行从左往右是从西往东。「.」是空气（那里原来有东西会挖掉），空格是不管（原来是什么留着什么）。门在上下两层画同一个字符。最大宽 16、深 16、高 12。', params: { name: '给图纸起个名字', text: '图纸' } },
+  { action: 'build', description: '照一张图纸盖起来（后台做）：材料不够会告诉你缺多少；够不着的地方身体会垫方块爬上去，盖完拆掉；每盖完一层告诉你一声', params: { name: '图纸的名字（先 design 或 template 过）', text: '坐标「x y z」：图纸第 1 层第一行第一格（西北角、最下面那格）放在哪' } },
   { action: 'chat', description: '在游戏的聊天栏里打字（游戏里的玩家才看得到；你回复里写的话是说出口的，不会进游戏聊天）', params: { text: '要发的话' } },
   { action: 'stop', description: '停下正在做的事' },
 ];
 
-const LONG = new Set(['collect', 'craft', 'smelt', 'go', 'go_to_player', 'attack', 'pickup', 'hide', 'flee', 'sleep']);
+const LONG = new Set(['collect', 'craft', 'smelt', 'go', 'go_to_player', 'attack', 'pickup', 'hide', 'flee', 'sleep', 'build']);
 
 const ERROR_TEXT: Record<string, string> = {
   not_connected: '还没进游戏',
@@ -127,6 +131,8 @@ export class MinecraftSession implements GameSession {
   private lastDimension: string | null = null;
   private lastRespectate = 0;
   private camera: CameraClient | null = null;
+  /** 她画好的图纸：名字 → 图纸（这局里一直在） */
+  private designs = new Map<string, Blueprint>();
   private preflightFailed = false;
   /** 开局前检查没过：这局其实没开 */
   get started(): boolean {
@@ -159,6 +165,7 @@ export class MinecraftSession implements GameSession {
       '【世界不会等你】你说话、想事情的时候，游戏里的时间照样在走：天会黑，怪会刷出来。用 game_continue 看发生了什么，它在有事发生时（或者最多两分钟）回来。',
       '【名字】物品、方块、生物都用游戏里的英文 id：oak_log（橡木原木）、cobblestone（圆石）、crafting_table（工作台）、wooden_pickaxe（木镐）、iron_ingot（铁锭）、zombie（僵尸）……',
       '【目标】长期想做的事用 goal 写下来，每个时刻都会提醒你，换多少轮都不会忘。',
+      '【盖房子】房子是你自己设计的：用 design 交一张图纸（图例 + 从下往上一层层的字符图），会给你看正面、侧面、俯视三张投影、材料清单和图上的问题，你看着改；满意了用 build 在一个坐标盖起来，身体照图纸一块块放。template 有几张常见建筑的参考图纸，可以照着改。',
       '【说话】你回复里写的话是说出口的（主人和观众听得到）；游戏里的玩家要用 chat 才看得到。',
       formatActionList(),
     ].join('\n');
@@ -218,7 +225,13 @@ export class MinecraftSession implements GameSession {
     if (!ACTIONS.some((a) => a.action === action.action)) return `没有这个动作：${action.action}。\n${formatActionList()}`;
     if (!this.runtime || !this.status?.connected) return '还没进游戏（先 game_start）。';
     if (['collect', 'craft', 'smelt', 'go_to_player', 'follow', 'attack', 'find', 'equip', 'drop', 'place'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
-    if (['go', 'place'].includes(action.action) && !parseXyz(action.text)) return `${action.action} 要在 text 里填坐标「x y z」。`;
+    if (['go', 'place', 'build'].includes(action.action) && !parseXyz(action.text)) return `${action.action} 要在 text 里填坐标「x y z」。`;
+    if (['template', 'design', 'build'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
+    if (action.action === 'design' && !action.text?.trim()) return 'design 要在 text 里放图纸。';
+    if (action.action === 'template' && !TEMPLATES[action.name!.trim()]) return `没有这张参考图纸：${action.name}。有：${Object.keys(TEMPLATES).join('、')}`;
+    if (action.action === 'build' && !this.designs.has(action.name!.trim())) {
+      return `还没有叫「${action.name}」的图纸${this.designs.size ? `（现在有：${[...this.designs.keys()].join('、')}）` : ''}：先 design 交一张，或者 template 拿一张参考图纸。`;
+    }
     if (['goal', 'chat'].includes(action.action) && !action.text?.trim()) return `${action.action} 要填 text。`;
     if (this.running && ['find', 'equip', 'drop', 'place'].includes(action.action)) {
       return `身体正在${this.running.label}，${action.action} 要等它做完，或者先 stop。`;
@@ -237,6 +250,27 @@ export class MinecraftSession implements GameSession {
         this.goal = action.text!.trim();
         this.note(`目标：${this.goal}`);
         return `记下了，目标：${this.goal}`;
+      case 'template':
+      case 'design': {
+        const title = action.name!.trim();
+        const text = action.action === 'template' ? TEMPLATES[title].text : action.text!;
+        const parsed = parseBlueprint(text);
+        if (!parsed.blueprint) {
+          return `图纸「${title}」读不了：\n- ${parsed.errors.join('\n- ')}${parsed.warnings.length ? `\n另外：\n- ${parsed.warnings.join('\n- ')}` : ''}`;
+        }
+        const names = Object.keys(materials(parsed.blueprint));
+        const bad = await runtime.command<Record<string, string>>('check-blocks', { names }, 10_000).catch(() => ({}));
+        const unknown = Object.values(bad);
+        if (!unknown.length) this.designs.set(title, parsed.blueprint);
+        const preview = describeBlueprint(title, parsed.blueprint, parsed.warnings, unknown);
+        const have = this.snapshot?.body?.inventory ?? {};
+        const short = Object.entries(materials(parsed.blueprint)).filter(([n, c]) => (have[n] ?? 0) < c).map(([n, c]) => `${n} 还差 ${c - (have[n] ?? 0)}`);
+        return [
+          action.action === 'template' ? `参考图纸 ${title}：${TEMPLATES[title].title}\n${text}\n` : '',
+          preview,
+          unknown.length ? '' : `存好了，可以 build ${title}。${short.length ? `照现在的背包，材料${short.join('，')}。` : '材料够了。'}`,
+        ].filter(Boolean).join('\n');
+      }
       case 'chat':
         await runtime.command('say', { message: action.text!.trim() });
         this.note(`聊天栏：${action.text!.trim()}`);
@@ -290,6 +324,11 @@ export class MinecraftSession implements GameSession {
         case 'hide': return ['hide', {}, '躲到地下'];
         case 'flee': return ['flee', {}, '逃开怪物'];
         case 'sleep': return ['sleep', {}, '睡觉'];
+        case 'build': {
+          const title = action.name!.trim();
+          const bp = this.designs.get(title)!;
+          return ['build_structure', { label: `「${title}」`, blocks: placements(bp, xyz!), clear: clearCells(bp, xyz!) }, `盖「${title}」`];
+        }
         default: return ['pickup_drops', { radius: 12 }, '捡附近的掉落物'];
       }
     })();
@@ -390,6 +429,9 @@ export class MinecraftSession implements GameSession {
         this.players = now;
         break;
       }
+      case 'build-progress':
+        this.push(event.text, false);
+        break;
       case 'death':
         // 正在做的事由身体自己报（死的时候它会停掉并回报），这里不清，免得两边对不上
         this.queue = [];

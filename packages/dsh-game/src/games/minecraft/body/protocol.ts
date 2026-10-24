@@ -10,6 +10,7 @@ export type MinecraftAction =
   | 'task-release'
   | 'follow'
   | 'hud-state'
+  | 'check-blocks'
   | 'stop';
 
 export type {
@@ -82,6 +83,8 @@ export type MinecraftRuntimeEvent =
   | { kind: 'oxygen-danger'; recovered: boolean; oxygen: number; method: 'surface' | 'last-breathable-position' | 'shore' | 'failed'; position: { x: number; y: number; z: number } }
   | { kind: 'creeper-evaded'; distance: number; ok: boolean }
   | { kind: 'disconnected'; reason: string }
+  /** 盖房子的进度（每盖完一层） */
+  | { kind: 'build-progress'; text: string }
   | { kind: 'log'; level: 'info' | 'warn' | 'error'; message: string };
 
 export type MinecraftWorkerMessage =

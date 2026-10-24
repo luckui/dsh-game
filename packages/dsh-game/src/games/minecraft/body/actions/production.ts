@@ -31,6 +31,21 @@ export function createProductionActions(): MinecraftActionHandler[] {
       },
     },
     {
+      name: 'build_structure',
+      async run(instruction, context) {
+        const blocks = Array.isArray(instruction.args.blocks) ? instruction.args.blocks as any[] : [];
+        const clear = Array.isArray(instruction.args.clear) ? instruction.args.clear as any[] : [];
+        if (!blocks.length) throw new Error('Missing Minecraft action argument: blocks');
+        const result = await context.adapter.buildStructure({
+          label: typeof instruction.args.label === 'string' ? instruction.args.label : 'the building',
+          blocks,
+          clear,
+          signal: context.signal,
+        });
+        return { ...result, actionId: instruction.id };
+      },
+    },
+    {
       name: 'smelt_item',
       async run(instruction, context) {
         const item = typeof instruction.args.item === 'string' ? instruction.args.item.trim() : undefined;

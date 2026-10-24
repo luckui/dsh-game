@@ -35,7 +35,8 @@ export type MinecraftActionName =
   | 'sow_crop'
   | 'place_block'
   | 'break_block'
-  | 'execute_blueprint';
+  | 'execute_blueprint'
+  | 'build_structure';
 
 export type MinecraftActionErrorCode =
   | 'not_connected'
