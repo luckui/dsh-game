@@ -321,7 +321,23 @@ export function createRuntimeWorkerController(
         await resumeFollowing();
       }
     },
-    shouldDefendAgainst: (entity) => entity.kind === 'hostile',
+    async onCreeperClose(state) {
+      // 跟溺水自救一样：停下手上的事（回报给她「苦力怕靠近，身体先躲开了」），躲开，再报一声
+      const actionId = hasForegroundAction() ? currentAction?.id : undefined;
+      if (actionId) {
+        await runtime.cancel(actionId, {
+          code: 'unsafe',
+          summary: 'a creeper came close, so the body stopped and backed away from it',
+          details: { reason: 'creeper', distance: Number(state.distance.toFixed(1)) },
+        });
+      } else {
+        await adapter.stopForeground();
+      }
+      const result = await adapter.evadeCreeper(new AbortController().signal);
+      emit({ kind: 'creeper-evaded', distance: state.distance, ok: result.outcome === 'succeeded' });
+    },
+    // 苦力怕不去近战（会一起炸），交给上面的躲避反射
+    shouldDefendAgainst: (entity) => entity.kind === 'hostile' && entity.name !== 'creeper',
   });
 
   async function stopForDeath(state: MinecraftDeathEvent): Promise<void> {

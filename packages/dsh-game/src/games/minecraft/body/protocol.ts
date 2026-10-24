@@ -77,6 +77,7 @@ export type MinecraftRuntimeEvent =
   | { kind: 'death'; position?: { x: number; y: number; z: number } }
   | { kind: 'movement-blocked'; mode: 'follow'; player: string; position: { x: number; y: number; z: number }; distance: number }
   | { kind: 'oxygen-danger'; recovered: boolean; oxygen: number; method: 'surface' | 'last-breathable-position' | 'failed'; position: { x: number; y: number; z: number } }
+  | { kind: 'creeper-evaded'; distance: number; ok: boolean }
   | { kind: 'disconnected'; reason: string }
   | { kind: 'log'; level: 'info' | 'warn' | 'error'; message: string };
 

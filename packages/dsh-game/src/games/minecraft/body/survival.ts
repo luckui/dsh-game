@@ -42,10 +42,10 @@ async function waitUntil(check: () => boolean, ms: number, signal?: AbortSignal)
   return check();
 }
 
-function hostilesNear(bot: any, radius: number): any[] {
+function hostilesNear(bot: any, radius: number, match: (e: any) => boolean = (e) => e?.type === 'hostile'): any[] {
   const me = bot.entity?.position;
   if (!me) return [];
-  return Object.values(bot.entities as Record<string, any>).filter((e) => e !== bot.entity && e?.type === 'hostile' && e.position && e.position.distanceTo(me) <= radius);
+  return Object.values(bot.entities as Record<string, any>).filter((e) => e !== bot.entity && match(e) && e.position && e.position.distanceTo(me) <= radius);
 }
 
 /** 原地往下挖两格钻进去，再把头顶封上 */
@@ -83,9 +83,9 @@ export async function hideUnderground(bot: any, signal: AbortSignal): Promise<Mi
 }
 
 /** 朝远离附近怪物的方向跑开 */
-export async function fleeFromHostiles(bot: any, signal: AbortSignal, distance = 16): Promise<MinecraftActionResult> {
+export async function fleeFromHostiles(bot: any, signal: AbortSignal, distance = 16, match?: (e: any) => boolean, safeRadius = 8): Promise<MinecraftActionResult> {
   const started = Date.now();
-  const threats = hostilesNear(bot, 24);
+  const threats = hostilesNear(bot, 24, match);
   if (!threats.length) return done(started, 'no hostile mob within 24 blocks');
   const me: Vec3 = bot.entity.position;
   let dx = 0;
@@ -107,13 +107,14 @@ export async function fleeFromHostiles(bot: any, signal: AbortSignal, distance =
   } catch (err) {
     bot.pathfinder.setGoal(null);
     if (signal.aborted) return failed(started, 'cancelled', 'cancelled');
-    const left = hostilesNear(bot, 8).map((e) => e.name);
-    if (!left.length) return done(started, `ran away (${(err as Error).message}); no hostile within 8 blocks now`);
+    const left = hostilesNear(bot, safeRadius, match).map((e) => e.name);
+    if (!left.length) return done(started, `ran away (${(err as Error).message}); no hostile within ${safeRadius} blocks now`);
     return failed(started, 'blocked', `could not get away: ${(err as Error).message}; still near ${left.join(', ')}`);
   } finally {
     bot.setControlState?.('sprint', false);
   }
-  const left = hostilesNear(bot, 8).map((e) => e.name);
+  const left = hostilesNear(bot, safeRadius, match).map((e) => e.name);
+  if (left.length && match) return failed(started, 'unsafe', `ran ${distance} blocks but ${left.join(', ')} is still within ${safeRadius} blocks`);
   return done(started, `ran ${distance} blocks away from ${threats.map((t) => t.name).join(', ')}${left.length ? `; still near ${left.join(', ')}` : ''}`);
 }
 

@@ -51,8 +51,11 @@ export interface Settings {
   mcHost: string;
   mcPort: number;
   mcUsername: string;
+  /** 自己服务器的 RCON 端口和密码（密码空 = 不用）：旁观的主人自动挂到她身上 */
+  mcRconPort: number;
+  mcRconPassword: string;
 }
-const DEFAULT_SETTINGS: Settings = { voice: DEFAULT_VOICE, censor: true, director: true, summaryModel: 'deepseek-official/deepseek-flash', ddlcDir: '', wolfModel: 'deepseek-official/deepseek-flash', wolfSeats: '', mcHost: '127.0.0.1', mcPort: 25565, mcUsername: 'DaFeiYu' };
+const DEFAULT_SETTINGS: Settings = { voice: DEFAULT_VOICE, censor: true, director: true, summaryModel: 'deepseek-official/deepseek-flash', ddlcDir: '', wolfModel: 'deepseek-official/deepseek-flash', wolfSeats: '', mcHost: '127.0.0.1', mcPort: 25565, mcUsername: 'DaFeiYu', mcRconPort: 25575, mcRconPassword: '' };
 
 /** 插件配置的读取方式：根插件 apply 时接上配置（插件页改了立刻生效，每次用时现读） */
 let readSettings: () => Partial<Settings> = () => ({});
@@ -357,6 +360,7 @@ export const GAMES = {
       host: settings.mcHost,
       port: Number(settings.mcPort) || 25565,
       username: settings.mcUsername,
+      rcon: settings.mcRconPassword ? { host: settings.mcHost, port: Number(settings.mcRconPort) || 25575, password: settings.mcRconPassword } : null,
       record,
       onAction: (text) => broadcast({ type: 'act', text, at: Date.now() }),
     }),

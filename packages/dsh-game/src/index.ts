@@ -49,6 +49,8 @@ export const Config = z.object({
   mcHost: z.string().default('127.0.0.1').description('Minecraft 服务器地址（Java 版）').volatile(),
   mcPort: z.natural().default(25565).description('Minecraft 服务器端口').volatile(),
   mcUsername: z.string().default('DaFeiYu').description('大肥鱼在 Minecraft 里的名字（英文、数字、下划线，3~16 个字）').volatile(),
+  mcRconPort: z.natural().default(25575).description('自己服务器的 RCON 端口').volatile(),
+  mcRconPassword: z.string().role('secret').description('自己服务器的 RCON 密码（server.properties 里的 rcon.password）；填了的话，旁观模式的玩家会自动挂到她身上').volatile(),
 });
 
 interface HostContext {
@@ -71,6 +73,8 @@ export function apply(ctx: HostContext, config: LiveConfig = {}): void {
     mcHost: config.mcHost?.get(),
     mcPort: config.mcPort?.get(),
     mcUsername: config.mcUsername?.get(),
+    mcRconPort: config.mcRconPort?.get(),
+    mcRconPassword: config.mcRconPassword?.get(),
   }));
   // 插件卸载（DSH 关闭、重载）时关掉游戏连接、卸载 mod
   ctx.effect(() => () => { void games.stop(); }, 'dsh-game session');

@@ -35,6 +35,8 @@ export interface MinecraftPolicyHandlers {
   onFollowBlocked?(state: MinecraftFollowBlocked): void;
   onFollowRecovered?(state: MinecraftFollowBlocked): void;
   onPlayersChanged?(players: string[]): void | Promise<void>;
+  /** 苦力怕贴近（4.5 格内）：同一只 4 秒内只报一次 */
+  onCreeperClose?(state: { distance: number; position: { x: number; y: number; z: number } }): void | Promise<void>;
   shouldDefendAgainst(entity: MinecraftEntitySnapshot): boolean;
 }
 
@@ -76,6 +78,8 @@ export interface MinecraftBodyAdapter {
   stopNavigation(): Promise<void>;
   /** 自保：躲到地下 / 逃开怪物 / 睡觉过夜（见 survival.ts） */
   hide(signal: AbortSignal): Promise<MinecraftActionResult>;
+  /** 苦力怕反射：躲开附近的苦力怕（跑开约 8 格） */
+  evadeCreeper(signal: AbortSignal): Promise<MinecraftActionResult>;
   flee(signal: AbortSignal): Promise<MinecraftActionResult>;
   sleep(signal: AbortSignal): Promise<MinecraftActionResult>;
   escapeToAir(): Promise<MinecraftSafetyRecovery>;

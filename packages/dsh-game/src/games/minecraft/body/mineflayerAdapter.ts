@@ -219,6 +219,26 @@ export function createMineflayerAdapter(
     stopFollowWatchdog();
   }
 
+  let creeperPoller: ReturnType<typeof setInterval> | undefined;
+  let lastCreeperAlert = 0;
+  function stopCreeperWatch(): void {
+    if (creeperPoller) clearInterval(creeperPoller);
+    creeperPoller = undefined;
+  }
+  /** 苦力怕反射：贴近 4.5 格就报给 worker（它停下手上的事、躲开） */
+  function startCreeperWatch(current: any): void {
+    stopCreeperWatch();
+    creeperPoller = setInterval(() => {
+      if (bot !== current || !current.entity || current.health <= 0) return;
+      const me = current.entity.position;
+      const creeper = current.nearestEntity?.((e: any) => e?.name === 'creeper' && e.position?.distanceTo(me) <= 4.5);
+      if (!creeper || Date.now() - lastCreeperAlert < 4000) return;
+      lastCreeperAlert = Date.now();
+      Promise.resolve(policyHandlers.onCreeperClose?.({ distance: creeper.position.distanceTo(me), position: vector(creeper.position) }))
+        .catch((error) => emit({ kind: 'log', level: 'error', message: `[survival] creeper handler failed: ${error instanceof Error ? error.message : String(error)}` }));
+    }, 250);
+  }
+
   function stopGazeTracking(): void {
     if (gazePoller) clearInterval(gazePoller);
     gazePoller = undefined;
@@ -695,6 +715,7 @@ export function createMineflayerAdapter(
     current.on('end', (reason: string) => {
       if (bot !== current) return;
       stopGazeTracking();
+      stopCreeperWatch();
       emit({
         kind: 'log',
         level: intentionalDisconnect ? 'info' : 'warn',
@@ -725,6 +746,7 @@ export function createMineflayerAdapter(
     notifyFoodState(current, policyHandlers);
     notifyPlayers(current, emit, policyHandlers);
     startGazeTracking(current);
+    startCreeperWatch(current);
   }
 
   async function collectBlocks(request: CollectionRequest): Promise<{
@@ -2327,6 +2349,13 @@ export function createMineflayerAdapter(
 
     hide(signal) {
       return hideUnderground(requireBot(bot), signal);
+    },
+
+    async evadeCreeper(signal) {
+      const current = requireBot(bot);
+      await current.pvp?.stop?.();
+      // 苦力怕爆炸半径约 3 格：跑开 10 格，5 格内没有就算躲开了
+      return fleeFromHostiles(current, signal, 10, (e: any) => e?.name === 'creeper', 5);
     },
 
     flee(signal) {

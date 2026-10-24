@@ -14,6 +14,7 @@ import type { GameAction, GameActionSpec, GameSession, Moment, RunEvent } from '
 import type { MinecraftActionResult, MinecraftEnvironmentSnapshot, MinecraftObservedEntity } from './body/contracts.js';
 import type { MinecraftRuntimeEvent, MinecraftStatus } from './body/protocol.js';
 import { MinecraftRuntimeManager } from './body/runtimeManager.js';
+import { rcon, type RconTarget } from './rcon.js';
 
 export interface MinecraftOptions {
   /** 打包好的身体子进程（lib/minecraft-worker.cjs） */
@@ -24,7 +25,12 @@ export interface MinecraftOptions {
   record: (event: RunEvent) => void;
   /** 她在游戏里做的事（给舞台终端显示） */
   onAction?: (text: string) => void;
+  /** 自己服务器的 RCON：有的话，旁观的玩家会被自动挂到她身上（她复活、换维度、对方被甩开时重新挂） */
+  rcon?: RconTarget | null;
 }
+
+/** 隔多久把旁观者重新挂一次（对方按了 Shift 被甩开时，最多这么久就挂回来） */
+const RESPECTATE_MS = 30_000;
 
 /** 身体在后台做的一件事 */
 interface Running {
@@ -108,6 +114,8 @@ export class MinecraftSession implements GameSession {
   private nudged = false;
   private firstMoment = true;
   private disconnected = false;
+  private lastDimension: string | null = null;
+  private lastRespectate = 0;
   private unsubscribe: (() => void) | null = null;
   finished = false;
 
@@ -341,6 +349,7 @@ export class MinecraftSession implements GameSession {
         // 正在做的事由身体自己报（死的时候它会停掉并回报），这里不清，免得两边对不上
         this.queue = [];
         this.push(`你死了${event.position ? `（在 ${fmtXyz(event.position)}）` : ''}。会在出生点复活，身上的东西掉在死的地方，几分钟内回去还能捡。`, true);
+        setTimeout(() => void this.attachSpectators(), 3000);
         break;
       case 'food-shortage':
         this.push(`饿了（饥饿值 ${event.food}/20），背包里没有能吃的。`, true);
@@ -350,6 +359,9 @@ export class MinecraftSession implements GameSession {
         break;
       case 'oxygen-danger':
         this.push(event.recovered ? '差点在水里憋死，身体游上来了。' : '在水里快憋死了，身体没能游上来！', true);
+        break;
+      case 'creeper-evaded':
+        this.push(event.ok ? '苦力怕贴过来，身体先躲开了。' : '苦力怕贴过来，身体想躲开但没躲掉！', true);
         break;
       case 'movement-blocked':
         this.push(`跟着 ${event.player} 走的时候被挡住了，过不去（离他 ${Math.round(event.distance)} 格）。`, true);
@@ -383,6 +395,10 @@ export class MinecraftSession implements GameSession {
       if (phase === '白天') this.push('天亮了。', false);
     }
     if (phase) this.lastPhase = phase;
+    const dimension = String(s?.world?.dimension ?? '');
+    const moved = this.lastDimension !== null && dimension !== this.lastDimension;
+    this.lastDimension = dimension;
+    if (moved || Date.now() - this.lastRespectate >= RESPECTATE_MS) void this.attachSpectators();
     // 新出现在 12 格内的敌对生物（同一只只报一次）
     for (const e of hostiles(s).filter((h) => h.distance <= 12)) {
       const key = `${e.name}@${Math.round(e.position.x / 4)},${Math.round(e.position.z / 4)}`;
@@ -397,7 +413,21 @@ export class MinecraftSession implements GameSession {
     if (!this.runtime || this.disconnected) return;
     this.snapshot = await this.runtime.command<MinecraftEnvironmentSnapshot>('snapshot', {}, 10_000);
     const status = await this.runtime.command<MinecraftStatus>('status', {}, 10_000).catch(() => null);
-    if (status) this.spectators = new Set(status.spectators ?? []);
+    if (status) {
+      const before = this.spectators;
+      this.spectators = new Set(status.spectators ?? []);
+      if ([...this.spectators].some((p) => !before.has(p))) void this.attachSpectators();
+    }
+  }
+
+  /** 把旁观模式的玩家挂到她身上（第一人称跟着她；F5 换第三人称）。没配 RCON 就什么都不做 */
+  private async attachSpectators(): Promise<void> {
+    const target = this.options.rcon;
+    this.lastRespectate = Date.now();
+    if (!target || !this.spectators.size || this.disconnected) return;
+    for (const name of this.spectators) {
+      await rcon(target, `spectate ${this.options.username} ${name}`).catch(() => {});
+    }
   }
 
   /** 在线的其他玩家（旁观模式的标出来：隐身、碰不到，也走不到他身边） */
