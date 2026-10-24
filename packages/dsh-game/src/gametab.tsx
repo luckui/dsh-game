@@ -363,6 +363,9 @@ export function GameView({ sessionId, events, send, stop, openSession }: GameTab
     screenBody = <div className="dg-screen dg-screen-wolf"><WolfTable colors={WOLF_COLORS} /></div>;
   } else if (state?.view) {
     screenBody = <WebScreen base={state.view} title={state.title ?? '游戏'} />;
+  } else if (state?.note) {
+    // 画面不在插件里（Minecraft：在摄像机客户端窗口里）
+    screenBody = <ScreenNote title={`${state.title ?? '游戏'}的画面在游戏客户端窗口里`} text={state.note} />;
   } else {
     screenBody = <GameScreen onLive={setLive} />;
   }

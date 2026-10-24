@@ -15,6 +15,7 @@ import type { MinecraftActionResult, MinecraftEnvironmentSnapshot, MinecraftObse
 import type { MinecraftRuntimeEvent, MinecraftStatus } from './body/protocol.js';
 import { MinecraftRuntimeManager } from './body/runtimeManager.js';
 import { rcon, type RconTarget } from './rcon.js';
+import { CameraClient, findJava, findMinecraftRoot } from './camera.js';
 
 export interface MinecraftOptions {
   /** 打包好的身体子进程（lib/minecraft-worker.cjs） */
@@ -27,6 +28,11 @@ export interface MinecraftOptions {
   onAction?: (text: string) => void;
   /** 网页画面的端口（0 = 不开） */
   viewPort: number;
+  /** 摄像机客户端（真的 Minecraft 客户端，旁观模式挂在她身上）；null = 不开。要有 RCON 才能把它切成旁观 */
+  camera?: { name: string; clientDir: string; java: string; gameDir: string } | null;
+  log?: (text: string) => void;
+  /** 给主人看的状态变了（摄像机开没开起来）：推一次游戏状态 */
+  onStateChange?: () => void;
   /** 自己服务器的 RCON：有的话，旁观的玩家会被自动挂到她身上（她复活、换维度、对方被甩开时重新挂） */
   rcon?: RconTarget | null;
 }
@@ -120,6 +126,19 @@ export class MinecraftSession implements GameSession {
   private lastDimension: string | null = null;
   private lastRespectate = 0;
   private lastHud = '';
+  private camera: CameraClient | null = null;
+  private cameraSeen = false;
+  private lastCameraCheck = 0;
+  /** 给主人看的摄像机状态（「游戏」标签页显示） */
+  private cameraNoteText = '';
+  private set cameraNote(text: string) {
+    this.cameraNoteText = text;
+    this.options.onStateChange?.();
+  }
+
+  get screenNote(): string {
+    return this.cameraNoteText;
+  }
   private unsubscribe: (() => void) | null = null;
   finished = false;
 
@@ -160,7 +179,8 @@ export class MinecraftSession implements GameSession {
         this.viewUrl = null;
       }
     }
-    for (const p of this.status.players) if (p !== this.status.username) this.players.add(p);
+    void this.startCamera();
+    for (const p of this.status.players) if (p !== this.status.username && p !== this.cameraName) this.players.add(p);
     this.options.record({ type: 'start', game: 'minecraft' });
     await this.refresh();
     this.lastHealth = this.snapshot?.body?.health ?? null;
@@ -309,6 +329,8 @@ export class MinecraftSession implements GameSession {
     this.poller = null;
     this.unsubscribe?.();
     this.unsubscribe = null;
+    this.camera?.stop();
+    this.camera = null;
     const runtime = this.runtime;
     this.runtime = null;
     if (!runtime) return;
@@ -351,7 +373,9 @@ export class MinecraftSession implements GameSession {
         if (event.player !== this.options.username) this.push(`【游戏聊天】${event.player}：${event.message}`, true);
         break;
       case 'players': {
-        const now = new Set(event.players.filter((p) => p !== this.options.username));
+        if (this.cameraName && event.players.includes(this.cameraName) && !this.cameraSeen) void this.cameraJoined();
+        this.cameraSeen = !!this.cameraName && event.players.includes(this.cameraName);
+        const now = new Set(event.players.filter((p) => p !== this.options.username && p !== this.cameraName));
         for (const p of now) if (!this.players.has(p)) this.push(`${p} 进了游戏`, false);
         for (const p of this.players) if (!now.has(p)) this.push(`${p} 离开了游戏`, false);
         this.players = now;
@@ -412,6 +436,7 @@ export class MinecraftSession implements GameSession {
     this.lastDimension = dimension;
     if (moved || Date.now() - this.lastRespectate >= RESPECTATE_MS) void this.attachSpectators();
     void this.updateHud();
+    void this.keepCameraAttached();
     // 新出现在 12 格内的敌对生物（同一只只报一次）
     for (const e of hostiles(s).filter((h) => h.distance <= 12)) {
       const key = `${e.name}@${Math.round(e.position.x / 4)},${Math.round(e.position.z / 4)}`;
@@ -431,6 +456,59 @@ export class MinecraftSession implements GameSession {
       this.spectators = new Set(status.spectators ?? []);
       if ([...this.spectators].some((p) => !before.has(p))) void this.attachSpectators();
     }
+  }
+
+  private get cameraName(): string {
+    return this.options.camera?.name ?? '';
+  }
+
+  /** 开摄像机客户端（和服务器同一个游戏版本），它进服后切成旁观、挂到她身上 */
+  private async startCamera(): Promise<void> {
+    const cam = this.options.camera;
+    if (!cam || this.camera) return;
+    if (!this.options.rcon) {
+      this.cameraNote = '没开摄像机客户端：要先在插件设置里填自己服务器的 RCON 密码（摄像机要切成旁观模式）。';
+      return;
+    }
+    const version = this.status?.version ?? '';
+    const root = findMinecraftRoot(cam.clientDir, version);
+    if (!root) {
+      this.cameraNote = `没开摄像机客户端：没找到装好的 Minecraft ${version}（在插件设置里填 .minecraft 目录，用 HMCL 或官方启动器装好这个版本）。`;
+      return;
+    }
+    this.camera = new CameraClient({
+      root, version, username: cam.name, host: this.options.host, port: this.options.port,
+      gameDir: cam.gameDir, java: findJava(cam.java, root), log: this.options.log,
+    });
+    this.cameraNote = `摄像机客户端（${cam.name}，Minecraft ${version}）正在打开，进服后会自动挂到她身上。`;
+    try {
+      await this.camera.start();
+      this.cameraNote = `她的画面在摄像机客户端窗口里（${cam.name}，跟着她的视角）。直播时 OBS 抓这个窗口。`;
+    } catch (err) {
+      this.camera = null;
+      this.cameraNote = `摄像机客户端没开起来：${(err as Error).message}`;
+    }
+  }
+
+  /** 摄像机进服了：切成旁观；挂到她身上由 keepCameraAttached 负责（刚进服还在加载地形时挂不上） */
+  private async cameraJoined(): Promise<void> {
+    const target = this.options.rcon;
+    if (!target) return;
+    await rcon(target, `gamemode spectator ${this.cameraName}`).catch(() => {});
+    this.lastCameraCheck = 0;
+  }
+
+  /** 摄像机没挂在她身上（坐标对不上）就挂上：刚进服、她复活、换维度、被甩开时都会这样；挂着的不动它，画面不闪 */
+  private async keepCameraAttached(): Promise<void> {
+    const target = this.options.rcon;
+    const me = this.snapshot?.body?.position;
+    if (!target || !this.cameraSeen || !me) return;
+    if (Date.now() - this.lastCameraCheck < 10_000) return;
+    this.lastCameraCheck = Date.now();
+    const reply = await rcon(target, `data get entity ${this.cameraName} Pos`).catch(() => '');
+    const nums = reply.match(/-?\d+(\.\d+)?(?=d)/g)?.map(Number);
+    const attached = nums && nums.length >= 3 && Math.hypot(nums[0] - me.x, nums[1] - me.y, nums[2] - me.z) < 0.3;
+    if (!attached) await rcon(target, `spectate ${this.options.username} ${this.cameraName}`).catch(() => {});
   }
 
   /** 画面角落的信息条：在做什么、血量和饥饿、目标（变了才发） */
@@ -454,13 +532,14 @@ export class MinecraftSession implements GameSession {
     this.lastRespectate = Date.now();
     if (!target || !this.spectators.size || this.disconnected) return;
     for (const name of this.spectators) {
+      if (name === this.cameraName) continue;
       await rcon(target, `spectate ${this.options.username} ${name}`).catch(() => {});
     }
   }
 
   /** 在线的其他玩家（旁观模式的标出来：隐身、碰不到，也走不到他身边） */
   private others(): string[] {
-    return [...this.players].map((p) => (this.spectators.has(p) ? `${p}（旁观模式：隐身，碰不到，也走不到他身边）` : p));
+    return [...this.players].filter((p) => p !== this.cameraName).map((p) => (this.spectators.has(p) ? `${p}（旁观模式：隐身，碰不到，也走不到他身边）` : p));
   }
 
   // ───────────────────────── 时刻 ─────────────────────────

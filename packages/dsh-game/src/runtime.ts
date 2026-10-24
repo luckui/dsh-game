@@ -56,8 +56,16 @@ export interface Settings {
   mcRconPassword: string;
   /** Minecraft 网页画面的端口（0 = 不开） */
   mcViewPort: number;
+  /** 摄像机客户端：开一个真的 Minecraft 客户端（离线账户、旁观模式）挂在她身上，画面就是她的视角 */
+  mcCamera: boolean;
+  /** 装好游戏的 .minecraft 目录（空 = 官方启动器的默认位置） */
+  mcClientDir: string;
+  /** Java 21（空 = 自动找 HMCL / 官方启动器带的） */
+  mcJava: string;
+  /** 摄像机在服务器里的名字 */
+  mcCameraName: string;
 }
-const DEFAULT_SETTINGS: Settings = { voice: DEFAULT_VOICE, censor: true, director: true, summaryModel: 'deepseek-official/deepseek-flash', ddlcDir: '', wolfModel: 'deepseek-official/deepseek-flash', wolfSeats: '', mcHost: '127.0.0.1', mcPort: 25565, mcUsername: 'DaFeiYu', mcRconPort: 25575, mcRconPassword: '', mcViewPort: 3077 };
+const DEFAULT_SETTINGS: Settings = { voice: DEFAULT_VOICE, censor: true, director: true, summaryModel: 'deepseek-official/deepseek-flash', ddlcDir: '', wolfModel: 'deepseek-official/deepseek-flash', wolfSeats: '', mcHost: '127.0.0.1', mcPort: 25565, mcUsername: 'DaFeiYu', mcRconPort: 25575, mcRconPassword: '', mcViewPort: 0, mcCamera: true, mcClientDir: '', mcJava: '', mcCameraName: 'DaFeiYuCam' };
 
 /** 插件配置的读取方式：根插件 apply 时接上配置（插件页改了立刻生效，每次用时现读） */
 let readSettings: () => Partial<Settings> = () => ({});
@@ -363,6 +371,11 @@ export const GAMES = {
       port: Number(settings.mcPort) || 25565,
       username: settings.mcUsername,
       viewPort: Number(settings.mcViewPort) || 0,
+      camera: settings.mcCamera
+        ? { name: settings.mcCameraName, clientDir: settings.mcClientDir, java: settings.mcJava, gameDir: path.join(process.env.DSH_HOME ?? os.tmpdir(), 'dsh-game', 'mc-camera') }
+        : null,
+      log: (text) => console.log(text),
+      onStateChange: () => announceGameState(),
       rcon: settings.mcRconPassword ? { host: settings.mcHost, port: Number(settings.mcRconPort) || 25575, password: settings.mcRconPassword } : null,
       record,
       onAction: (text) => broadcast({ type: 'act', text, at: Date.now() }),
@@ -389,6 +402,8 @@ export interface GameState {
   closed: { game: string; title: string; owner: string | null; reason: 'owner' | 'replaced'; note?: string } | null;
   /** 游戏画面的网页地址（有的话「游戏」标签页嵌进来） */
   view?: string | null;
+  /** 画面不在插件里时给主人看的说明 */
+  note?: string | null;
 }
 
 let current: GameSession | null = null;
@@ -412,7 +427,7 @@ export const games = {
   },
   state(): GameState {
     if (!current) return { status: 'none', game: lastClosed?.game ?? null, title: lastClosed?.title ?? null, owner: null, closed: lastClosed };
-    return { status: current.finished ? 'finished' : paused ? 'paused' : 'running', game: current.id, title: current.title, owner: currentOwner, closed: null, view: current.viewUrl ?? null };
+    return { status: current.finished ? 'finished' : paused ? 'paused' : 'running', game: current.id, title: current.title, owner: currentOwner, closed: null, view: current.viewUrl ?? null, note: current.screenNote || null };
   },
   /** 上一局是怎么关掉的 */
   get closed(): GameState['closed'] {

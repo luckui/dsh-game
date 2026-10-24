@@ -59,6 +59,8 @@ export type MinecraftBehavior =
 export interface MinecraftStatus {
   connected: boolean;
   username?: string;
+  /** 服务器的游戏版本（mineflayer 连上后协商的） */
+  version?: string;
   host?: string;
   port?: number;
   players: string[];

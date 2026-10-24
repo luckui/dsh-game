@@ -15,6 +15,8 @@ if (!clientOnly) await build({
   entryPoints: { index: 'src/index.ts', agent: 'src/agent.ts' },
   outdir: 'lib',
   splitting: true,
+  // CommonJS 的启动器库（摄像机客户端）运行时从 node_modules 加载：打进 ESM 包里它的 require('child_process') 会失效
+  external: ['minecraft-launcher-core'],
   chunkNames: 'chunks/[name]-[hash]',
   bundle: true,
   platform: 'node',

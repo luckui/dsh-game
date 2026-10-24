@@ -2290,6 +2290,7 @@ export function createMineflayerAdapter(
       return {
         connected: Boolean(bot),
         username: bot?.username,
+        version: bot?.version,
         host: connection?.host,
         port: connection?.port,
         players: bot ? humanPlayerNames(bot) : [],
