@@ -86,6 +86,11 @@ export interface MinecraftBodyAdapter {
   checkBlocks(names: string[]): Record<string, string>;
   /** 照图纸盖房子（见 build.ts） */
   buildStructure(options: { label: string; blocks: BuildBlock[]; clear: { x: number; y: number; z: number }[]; signal: AbortSignal }): Promise<MinecraftActionResult>;
+  /** 种地、收庄稼、繁殖、剪羊毛（见 farming.ts） */
+  farmPlot(options: { seed: string; corner: { x: number; y: number; z: number }; size: number; signal: AbortSignal }): Promise<MinecraftActionResult>;
+  harvestCrops(options: { crop?: string; radius: number; replant: boolean; signal: AbortSignal }): Promise<MinecraftActionResult>;
+  breedAnimals(options: { animal: string; pairs: number; signal: AbortSignal }): Promise<MinecraftActionResult>;
+  shearSheep(options: { count: number; signal: AbortSignal }): Promise<MinecraftActionResult>;
   /** 还开着的界面（熔炉、箱子、工作台……）关掉，鼠标上拿着的东西先放回背包 */
   closeStrayWindow(): Promise<void>;
   /** 苦力怕反射：躲开附近的苦力怕（跑开约 8 格） */

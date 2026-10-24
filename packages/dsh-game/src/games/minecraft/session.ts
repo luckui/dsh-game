@@ -78,11 +78,15 @@ const ACTIONS: GameActionSpec[] = [
   { action: 'template', description: `看一张常见建筑的参考图纸（存成同名图纸：可以直接 build，也可以照着改了再 design）：${Object.entries(TEMPLATES).map(([id, t]) => `${id}（${t.title}）`).join('、')}`, params: { name: '参考图纸的名字' } },
   { action: 'design', description: '交一张自己画的图纸，看它的正面、侧面、俯视三张投影、材料清单和问题（不会动手盖）。格式：先写「图例：」，每行「字符 方块的英文 id」，楼梯、门这类可以跟 facing=north/south/east/west（放的时候人朝哪边）、half=top/bottom；再写「第1层：」「第2层：」……从下往上一层层画。每层第一行在最北边，往下一行往南一格；每行从左往右是从西往东。「.」是空气（那里原来有东西会挖掉），空格是不管（原来是什么留着什么）。门在上下两层画同一个字符。最大宽 16、深 16、高 12。', params: { name: '给图纸起个名字', text: '图纸' } },
   { action: 'build', description: '照一张图纸盖起来（后台做）：材料不够会告诉你缺多少；够不着的地方身体会垫方块爬上去，盖完拆掉；每盖完一层告诉你一声', params: { name: '图纸的名字（先 design 或 template 过）', text: '坐标「x y z」：图纸第 1 层第一行第一格（西北角、最下面那格）放在哪' } },
+  { action: 'farm', description: '开一块地种上（后台做）：清掉地上的草、用锄头锄成耕地、播种。要有锄头（任何材质）和种子；耕地 4 格内有水才长得快（没有水会告诉你）', params: { name: '种子：wheat_seeds（小麦）、carrot、potato、beetroot_seeds（甜菜）', text: '坐标「x y z」：地的西北角（地面那格）', index: '边长（默认 3，最大 9）' } },
+  { action: 'harvest', description: '收附近 16 格内熟了的庄稼，捡起来，再补种回去（后台做）；没熟的会告诉你长到第几阶段了', params: { name: '只收哪种：wheat、carrots、potatoes、beetroots（不填就都收）' } },
+  { action: 'breed', description: '拿饲料喂附近的动物让它们生小的（后台做）：牛、羊吃 wheat，猪吃 carrot / potato / beetroot，鸡吃种子；喂过的动物 5 分钟后才能再生', params: { name: '动物的英文 id，比如 cow、sheep、pig、chicken', index: '喂几对（默认 1）' } },
+  { action: 'shear', description: '用剪刀剪附近羊的羊毛（后台做）；剪过的羊吃了草才会长回来', params: { index: '剪几只（默认 3）' } },
   { action: 'chat', description: '在游戏的聊天栏里打字（游戏里的玩家才看得到；你回复里写的话是说出口的，不会进游戏聊天）', params: { text: '要发的话' } },
   { action: 'stop', description: '停下正在做的事' },
 ];
 
-const LONG = new Set(['collect', 'craft', 'smelt', 'go', 'go_to_player', 'attack', 'pickup', 'hide', 'flee', 'sleep', 'build']);
+const LONG = new Set(['collect', 'craft', 'smelt', 'go', 'go_to_player', 'attack', 'pickup', 'hide', 'flee', 'sleep', 'build', 'farm', 'harvest', 'breed', 'shear']);
 
 const ERROR_TEXT: Record<string, string> = {
   not_connected: '还没进游戏',
@@ -174,6 +178,7 @@ export class MinecraftSession implements GameSession {
       '【名字】物品、方块、生物都用游戏里的英文 id：oak_log（橡木原木）、cobblestone（圆石）、crafting_table（工作台）、wooden_pickaxe（木镐）、iron_ingot（铁锭）、zombie（僵尸）……',
       '【目标】长期想做的事用 goal 写下来，每个时刻都会提醒你，换多少轮都不会忘。',
       '【盖房子】房子是你自己设计的：用 design 交一张图纸（图例 + 从下往上一层层的字符图），会给你看正面、侧面、俯视三张投影、材料清单和图上的问题，你看着改；满意了用 build 在一个坐标盖起来，身体照图纸一块块放。template 有几张常见建筑的参考图纸，可以照着改。',
+      '【种地】锄头锄过的泥土是耕地，种子种上去过几分钟（游戏时间）一阶一阶长大；耕地离水 4 格以内长得快。熟了用 harvest 收，种子会补种回去。动物用对的饲料喂一对就会生一只小的；栅栏、羊圈可以用 design 画了 build。',
       '【说话】你回复里写的话是说出口的（主人和观众听得到）；游戏里的玩家要用 chat 才看得到。',
       formatActionList(),
     ].join('\n');
@@ -234,8 +239,8 @@ export class MinecraftSession implements GameSession {
   refuse(action: GameAction): string | null {
     if (!ACTIONS.some((a) => a.action === action.action)) return `没有这个动作：${action.action}。\n${formatActionList()}`;
     if (!this.runtime || !this.status?.connected) return '还没进游戏（先 game_start）。';
-    if (['collect', 'craft', 'smelt', 'go_to_player', 'follow', 'attack', 'find', 'equip', 'drop', 'place'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
-    if (['go', 'place', 'build'].includes(action.action) && !parseXyz(action.text)) return `${action.action} 要在 text 里填坐标「x y z」。`;
+    if (['collect', 'craft', 'smelt', 'go_to_player', 'follow', 'attack', 'find', 'equip', 'drop', 'place', 'farm', 'breed'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
+    if (['go', 'place', 'build', 'farm'].includes(action.action) && !parseXyz(action.text)) return `${action.action} 要在 text 里填坐标「x y z」。`;
     if (['template', 'design', 'build'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
     if (action.action === 'design' && !action.text?.trim()) return 'design 要在 text 里放图纸。';
     if (action.action === 'template' && !TEMPLATES[action.name!.trim()]) return `没有这张参考图纸：${action.name}。有：${Object.keys(TEMPLATES).join('、')}`;
@@ -349,6 +354,13 @@ export class MinecraftSession implements GameSession {
           const bp = this.designs.get(title)!;
           return ['build_structure', { label: `「${title}」`, blocks: placements(bp, xyz!), clear: clearCells(bp, xyz!) }, `盖「${title}」`];
         }
+        case 'farm': {
+          const size = Math.max(1, Math.min(9, Math.round(action.index ?? 3)));
+          return ['farm_plot', { seed: name, corner: xyz, size }, `在 ${fmtXyz(xyz!)} 开 ${size}×${size} 的地种 ${name}`];
+        }
+        case 'harvest': return ['harvest_crops', { crop: name || undefined, radius: 16, replant: true }, `收${name ? ` ${name}` : '庄稼'}`];
+        case 'breed': return ['breed_animals', { animal: name, pairs: Math.min(4, count) }, `喂 ${name} 繁殖`];
+        case 'shear': return ['shear_sheep', { count: Math.min(16, action.index ? count : 3) }, '剪羊毛'];
         default: return ['pickup_drops', { radius: 12 }, '捡附近的掉落物'];
       }
     })();

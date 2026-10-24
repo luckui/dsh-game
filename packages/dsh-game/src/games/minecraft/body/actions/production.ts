@@ -46,6 +46,53 @@ export function createProductionActions(): MinecraftActionHandler[] {
       },
     },
     {
+      name: 'farm_plot',
+      async run(instruction, context) {
+        const corner = positionArg(instruction.args.corner);
+        if (!corner) throw new Error('Missing Minecraft action argument: corner');
+        const result = await context.adapter.farmPlot({
+          seed: stringArg(instruction.args.seed, 'seed'),
+          corner,
+          size: numberArg(instruction.args.size, 3, 1, 9),
+          signal: context.signal,
+        });
+        return { ...result, actionId: instruction.id };
+      },
+    },
+    {
+      name: 'harvest_crops',
+      async run(instruction, context) {
+        const result = await context.adapter.harvestCrops({
+          crop: typeof instruction.args.crop === 'string' && instruction.args.crop.trim() ? instruction.args.crop.trim() : undefined,
+          radius: numberArg(instruction.args.radius, 16, 2, 32),
+          replant: instruction.args.replant !== false,
+          signal: context.signal,
+        });
+        return { ...result, actionId: instruction.id };
+      },
+    },
+    {
+      name: 'breed_animals',
+      async run(instruction, context) {
+        const result = await context.adapter.breedAnimals({
+          animal: stringArg(instruction.args.animal, 'animal'),
+          pairs: numberArg(instruction.args.pairs, 1, 1, 4),
+          signal: context.signal,
+        });
+        return { ...result, actionId: instruction.id };
+      },
+    },
+    {
+      name: 'shear_sheep',
+      async run(instruction, context) {
+        const result = await context.adapter.shearSheep({
+          count: numberArg(instruction.args.count, 3, 1, 16),
+          signal: context.signal,
+        });
+        return { ...result, actionId: instruction.id };
+      },
+    },
+    {
       name: 'smelt_item',
       async run(instruction, context) {
         const item = typeof instruction.args.item === 'string' ? instruction.args.item.trim() : undefined;

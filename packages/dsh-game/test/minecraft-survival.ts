@@ -15,7 +15,7 @@ import { MinecraftSession } from '../src/games/minecraft/session.js';
 import { rcon as rconRaw, type RconTarget } from '../src/games/minecraft/rcon.js';
 
 const ROOT = path.resolve(process.argv[2] ?? '.');
-/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量）、build（盖房子）、不填 = 全部 */
+/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量）、build（盖房子）、farm（种地、养动物）、不填 = 全部 */
 const SUITE = process.argv[3] ?? 'all';
 const props = Object.fromEntries(
   fs.readFileSync(path.join(ROOT, '.mc-server', 'server.properties'), 'utf8').split(/\r?\n/)
@@ -123,6 +123,8 @@ async function step(
   for (const n of [...new Set([...Object.keys(inv0), ...watch])]) before[n] = await serverCount(n);
   const dropsBefore = expect.noDrops ? await droppedNearby() : 0;
   const line = await act(action, args, expect.timeoutMs, expect.onStart);
+  // 刚做完那一刻她在哪、附近地上有什么（报的背包变化对不上时看）
+  const atEnd = `她在 ${await rcon(`data get entity ${NAME} Pos`)}；附近地上：${await rcon(`execute as @e[type=item,x=${X},y=${Y},z=${Z},distance=..30] run data get entity @s Pos`)} / ${await rcon(`execute as @e[type=item,x=${X},y=${Y},z=${Z},distance=..30] run data get entity @s Item`)}`;
   await sleep(800);
   check((expect.ok ?? /做完了/).test(line), `结果：${(expect.ok ?? /做完了/).source}`);
   const reported = reportedDelta(line);
@@ -136,6 +138,7 @@ async function step(
   if (/背包变化/.test(line)) {
     const mismatch = names.filter((n) => (reported[n] ?? 0) !== (real[n] ?? 0)).map((n) => `${n} 报 ${reported[n] ?? 0} / 实际 ${real[n] ?? 0}`);
     check(mismatch.length === 0, `报给她的背包变化和服务器一致${mismatch.length ? `：${mismatch.join('；')}` : ''}`);
+    if (mismatch.length) note(`做完那一刻：${atEnd}`);
   }
   for (const [n, g] of Object.entries(expect.gain ?? {})) check((real[n] ?? 0) === g, `${n} 变化 ${real[n] ?? 0}（应为 ${g}）`);
   for (const [n, g] of Object.entries(expect.atLeast ?? {})) check((real[n] ?? 0) >= g, `${n} 变化 ${real[n] ?? 0}（至少 ${g}）`);
@@ -416,6 +419,85 @@ async function buildCases(): Promise<void> {
   check(stairsWrong.length === 0, `朝向都对（不对的：${stairsWrong.join('；')}）`);
 }
 
+/** 这些格子里有几格是这种方块 */
+async function countBlocks(cells: { x: number; y: number; z: number }[], block: string): Promise<number> {
+  let n = 0;
+  for (const c of cells) if (/passed|通过/i.test(await rcon(`execute if block ${c.x} ${c.y} ${c.z} ${block}`))) n += 1;
+  return n;
+}
+async function countEntities(type: string): Promise<number> {
+  const m = (await rcon(`execute if entity @e[type=${type},x=${X},y=${Y},z=${Z},distance=..30]`)).match(/count:\s*(\d+)/i);
+  return m ? Number(m[1]) : 0;
+}
+
+/** 种地、收庄稼、繁殖、剪羊毛 */
+async function farmCases(): Promise<void> {
+  await rcon(`fill ${X - 9} ${Y + 1} ${Z - 9} ${X + 9} ${Y + 6} ${Z + 9} air`);
+  await rcon(`kill @e[type=!player,x=${X},y=${Y},z=${Z},distance=..40]`);
+  // 一块 4×4 的草地，长着草，东边一条水渠；东南角一块没水的泥地
+  await rcon(`fill ${X - 8} ${Y} ${Z - 8} ${X - 5} ${Y} ${Z - 5} grass_block`);
+  await rcon(`fill ${X - 8} ${Y + 1} ${Z - 8} ${X - 5} ${Y + 1} ${Z - 6} short_grass`);
+  await rcon(`fill ${X - 4} ${Y} ${Z - 8} ${X - 4} ${Y} ${Z - 5} water`);
+  await reset();
+  await rcon(`tp ${NAME} ${X} ${Y + 1} ${Z}`);
+  await sleep(1500);
+  const field: { x: number; y: number; z: number }[] = [];
+  for (let dx = 0; dx < 4; dx++) for (let dz = 0; dz < 4; dz++) field.push({ x: X - 8 + dx, y: Y + 1, z: Z - 8 + dz });
+
+  begin('种地：没锄头、没种子');
+  const noHoe = await act('farm', { name: 'wheat_seeds', text: `${X - 8} ${Y} ${Z - 8}`, index: 4 });
+  check(/没成/.test(noHoe) && /hoe/.test(noHoe), `没锄头：不开工，说要锄头（${noHoe.slice(0, 120)}）`);
+
+  begin('种地：清草、锄地、播种（旁边有水渠）');
+  await rcon(`give ${NAME} wooden_hoe 1`);
+  await rcon(`give ${NAME} wheat_seeds 20`);
+  await sleep(800);
+  const planted = await step('farm', { name: 'wheat_seeds', text: `${X - 8} ${Y} ${Z - 8}`, index: 4 }, { ok: /：做完了/ });
+  check(!/no water/.test(planted), '有水渠：没说缺水');
+  check((await countBlocks(field, 'wheat')) === 16, `16 格都种上了小麦（种上 ${await countBlocks(field, 'wheat')} 格）`);
+  check((await countBlocks(field.map((c) => ({ ...c, y: Y })), 'farmland')) === 16, '16 格都是耕地');
+
+  begin('种地：没水的地会说（从水渠里出发）');
+  await rcon(`give ${NAME} carrot 4`);
+  await rcon(`tp ${NAME} ${X - 4} ${Y} ${Z - 6}`);
+  await sleep(1500);
+  const dryLine = await step('farm', { name: 'carrot', text: `${X + 3} ${Y + 1} ${Z + 3}`, index: 2 }, { ok: /：做完了/, gain: { carrot: -4 } });
+  check(/no water/.test(dryLine), `说了没水长得慢（${dryLine.slice(0, 200)}）`);
+
+  begin('收庄稼：还没熟');
+  const unripe = await step('harvest', { name: 'wheat' }, { ok: /：做完了/, gain: { wheat: 0 } });
+  check(/none ripe/.test(unripe), `说了还没熟、长到第几阶段（${unripe.slice(0, 200)}）`);
+
+  begin('收庄稼：熟了收、补种');
+  await rcon(`fill ${X - 8} ${Y + 1} ${Z - 8} ${X - 5} ${Y + 1} ${Z - 5} wheat[age=7] replace wheat`);
+  await sleep(500);
+  await step('harvest', { name: 'wheat' }, { ok: /：做完了/, atLeast: { wheat: 16 } });
+  check((await countBlocks(field, 'wheat[age=0]')) === 16, `16 格都补种回去了（${await countBlocks(field, 'wheat[age=0]')} 格）`);
+
+  begin('繁殖：没饲料');
+  await rcon(`summon cow ${X + 2} ${Y + 1} ${Z - 2}`);
+  await rcon(`summon cow ${X + 3} ${Y + 1} ${Z - 2}`);
+  await rcon(`clear ${NAME} wheat`);
+  await sleep(800);
+  const noFood = await act('breed', { name: 'cow', index: 1 });
+  check(/没成/.test(noFood) && /wheat/.test(noFood), `没小麦：说要 wheat（${noFood.slice(0, 120)}）`);
+
+  begin('繁殖：两头牛喂小麦');
+  await rcon(`give ${NAME} wheat 4`);
+  await sleep(800);
+  const cows0 = await countEntities('cow');
+  const bred = await step('breed', { name: 'cow', index: 1 }, { ok: /：做完了/, gain: { wheat: -2 } });
+  check((await countEntities('cow')) === cows0 + 1, `多了一头小牛（${cows0} → ${await countEntities('cow')}）；她看到的：${bred.slice(0, 160)}`);
+
+  begin('剪羊毛');
+  await rcon(`summon sheep ${X - 2} ${Y + 1} ${Z + 4} {Color:0b}`);
+  await rcon(`summon sheep ${X - 3} ${Y + 1} ${Z + 5} {Color:0b}`);
+  await rcon(`give ${NAME} shears 1`);
+  await sleep(800);
+  await step('shear', { index: 2 }, { ok: /：做完了/, atLeast: { white_wool: 2 } });
+  await rcon(`kill @e[type=!player,x=${X},y=${Y},z=${Z},distance=..40]`);
+}
+
 async function reset(): Promise<void> {
   await rcon(`clear ${NAME}`);
   await rcon(`effect clear ${NAME}`);
@@ -442,6 +524,7 @@ async function main(): Promise<void> {
     if (SUITE === 'all' || SUITE === 'basic') await basicCases();
     if (SUITE === 'all' || SUITE === 'edge') await edgeCases();
     if (SUITE === 'all' || SUITE === 'build') await buildCases();
+    if (SUITE === 'all' || SUITE === 'farm') await farmCases();
   } finally {
     await session.stop().catch(() => {});
     await rcon(`forceload remove ${X - 16} ${Z - 16} ${X + 16} ${Z + 16}`);

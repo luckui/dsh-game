@@ -17,6 +17,7 @@ import {
 import { gatherWood } from './gatherWood.js';
 import { fleeFromHostiles, hideUnderground, sleepInBed, swimToShore } from './survival.js';
 import { buildStructure } from './build.js';
+import { breedAnimals, farmPlot, harvestCrops, shearSheep } from './farming.js';
 import { placeBlockAt as airiPlaceBlockAt, breakBlockAt, isInteractive, isReplaceableForPlacement, type PlaceFace } from './placeBlock.js';
 import { Vec3 } from 'vec3';
 import { runAdaptiveCollection } from './collectionStrategy.js';
@@ -838,6 +839,26 @@ export function createMineflayerAdapter(
       }
     }
     return { total, byName, skipped, missingTool };
+  }
+
+  /** 走到够得着的地方，换上合适的工具，挖掉这一格；盖房子时草、雪这类能直接放东西的不挖（skipReplaceable） */
+  async function digAt(current: any, target: Vec3, signal?: AbortSignal, skipReplaceable = false): Promise<void> {
+    if (current.entity.position.distanceTo(target.offset(0.5, 0.5, 0.5)) > 4) {
+      const r = await patchedGoto(current, new goals.GoalNear(target.x, target.y, target.z, 3), { signal });
+      if (!r.ok) throw new Error(r.message);
+    }
+    const b = current.blockAt(target);
+    if (!b || b.name === 'air' || (skipReplaceable && isReplaceableForPlacement(b))) return;
+    await current.tool?.equipForBlock?.(b, {}).catch?.(() => {});
+    await current.dig(b, true);
+  }
+
+  function farmHelpers(current: any, signal: AbortSignal) {
+    return {
+      dig: (target: Vec3) => digAt(current, target, signal),
+      pickup: async (radius: number) => { await collectItemDrops(radius, signal); },
+      log: (text: string) => emit({ kind: 'log', level: 'warn', message: text }),
+    };
   }
 
   async function collectItemDrops(
@@ -2431,21 +2452,31 @@ export function createMineflayerAdapter(
       const current = requireBot(bot);
       return buildStructure(current, options, {
         place: async (item, target) => { await placeBlockAt(current, item, target, 'auto', options.signal); },
-        dig: async (target) => {
-          if (current.entity.position.distanceTo(target.offset(0.5, 0.5, 0.5)) > 4) {
-            const r = await patchedGoto(current, new goals.GoalNear(target.x, target.y, target.z, 3), { signal: options.signal });
-            if (!r.ok) throw new Error(r.message);
-          }
-          const b = current.blockAt(target);
-          if (!b || isReplaceableForPlacement(b)) return;
-          await current.tool?.equipForBlock?.(b, {}).catch?.(() => {});
-          await current.dig(b, true);
-        },
+        dig: (target) => digAt(current, target, options.signal, true),
         pickup: async (radius) => { await collectItemDrops(radius, options.signal); },
         progress: (text) => emit({ kind: 'build-progress', text }),
         placed: (b) => emit({ kind: 'build-placed', x: b.x, y: b.y, z: b.z, name: b.name }),
         log: (text) => emit({ kind: 'log', level: 'warn', message: text }),
       });
+    },
+
+    async farmPlot(options) {
+      const current = requireBot(bot);
+      return farmPlot(current, options, farmHelpers(current, options.signal));
+    },
+
+    async harvestCrops(options) {
+      const current = requireBot(bot);
+      return harvestCrops(current, options, farmHelpers(current, options.signal));
+    },
+
+    async breedAnimals(options) {
+      return breedAnimals(requireBot(bot), options);
+    },
+
+    async shearSheep(options) {
+      const current = requireBot(bot);
+      return shearSheep(current, options, farmHelpers(current, options.signal));
     },
 
     async closeStrayWindow() {
@@ -3491,7 +3522,8 @@ async function walkPickupDrops(
     found += 1;
     attempted.add(entityKey(item));
     try {
-      await bot.pathfinder.goto(new goals.GoalNear(item.position.x, item.position.y, item.position.z, 0.8));
+      // 抬半格：掉在耕地、灵魂沙这类不满一格的方块上时，往下取整会落到方块里面，寻路器会把它挖掉
+      await bot.pathfinder.goto(new goals.GoalNear(item.position.x, item.position.y + 0.5, item.position.z, 0.8));
     } catch {
       continue;
     }
