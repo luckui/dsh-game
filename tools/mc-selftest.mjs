@@ -21,5 +21,6 @@ await build({
   target: 'node22',
   logLevel: 'warning',
 });
-const run = spawnSync(process.execPath, [out, root], { stdio: 'inherit' });
+// 参数：basic / edge（不填 = 全部）
+const run = spawnSync(process.execPath, [out, root, ...process.argv.slice(2)], { stdio: 'inherit' });
 process.exit(run.status ?? 1);

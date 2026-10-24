@@ -72,6 +72,8 @@ export class MinecraftEmbodimentRuntime {
       );
     } finally {
       if (this.active?.id === instruction.id) this.active = undefined;
+      // 动作结束（成没成都一样）还开着的界面（熔炉、箱子、工作台……）关掉：开着的时候背包的更新进的是那个界面，身体看到的背包就对不上了
+      await this.options.adapter.closeStrayWindow().catch(() => {});
     }
   }
 

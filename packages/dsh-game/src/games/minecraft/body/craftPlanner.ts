@@ -45,6 +45,8 @@ interface PlanningState {
   totalRequired: Record<string, number>;
   missing: Record<string, number>;
   sources: Record<string, string>;
+  /** 缺的东西里采不到的（只能合成出来：铁粒、煤块、粗铁块……） */
+  ungatherable: Record<string, true>;
   requiresCraftingTable: boolean;
   operationCount: number;
   preferenceCost: number;
@@ -111,6 +113,7 @@ export function planCraft(bot: Bot, itemName: string, amount: number): CraftPlan
     totalRequired: {},
     missing: {},
     sources: {},
+    ungatherable: {},
     requiresCraftingTable: false,
     operationCount: 0,
     preferenceCost: 0,
@@ -164,7 +167,15 @@ function ensureStock(
 
   const childPath = new Set(path);
   childPath.add(itemName);
+  // 能从别的方块挖到的东西（煤来自煤矿、粗铁来自铁矿）：「直接去采」也是一条路，和各种合成路一起比。
+  // 不然缺粗铁时只会想到「用粗铁块拆」，再去缺粗铁块
   let best: PlanningState | null = null;
+  if (droppedByOtherBlock(context.registry, itemName, itemId)) {
+    best = clonePlanningState(state);
+    best.missing[itemName] = (best.missing[itemName] ?? 0) + shortage;
+    best.sources[itemName] = sourceHint(context.registry, itemName, itemId);
+    best.stock[itemName] = (best.stock[itemName] ?? 0) + shortage;
+  }
 
   for (const candidate of candidates) {
     context.expandedBranches += 1;
@@ -206,6 +217,17 @@ function ensureStock(
     if (!best || comparePlanningStates(branch, best) < 0) best = branch;
   }
 
+  // 每条配方路都绕回了自己（铁锭 ↔ 铁块 ↔ 铁粒、煤 ↔ 煤块）：当成要去采的原料，和没有配方的东西一样。
+  // 不这样的话整条规划失败，上面只能说「缺目标本身」（「缺 1 个铁块，去挖铁块」）
+  if (!best) {
+    const raw = clonePlanningState(state);
+    raw.missing[itemName] = (raw.missing[itemName] ?? 0) + shortage;
+    raw.sources[itemName] = sourceHint(context.registry, itemName, itemId);
+    raw.stock[itemName] = (raw.stock[itemName] ?? 0) + shortage;
+    // 能合成的东西要算「采得到」，得有别的方块掉它（煤矿掉煤、铁矿掉粗铁）；煤块、粗铁块挖下来只掉自己，是合成出来的
+    if (!droppedByOtherBlock(context.registry, itemName, itemId)) raw.ungatherable[itemName] = true;
+    return raw;
+  }
   return best;
 }
 
@@ -312,6 +334,8 @@ function comparePlanningStates(left: PlanningState, right: PlanningState): numbe
 
 function planningRank(state: PlanningState): number[] {
   return [
+    // 缺的东西里采不到的越少越好：缺 5 个粗铁 + 1 个煤，好过缺 45 个铁粒、好过缺 1 个煤块 + 1 个粗铁块
+    Object.keys(state.missing).filter((name) => state.ungatherable[name]).length,
     Object.keys(state.missing).length,
     Object.values(state.missing).reduce((sum, count) => sum + count, 0),
     -state.initialStockUsed,
@@ -351,6 +375,7 @@ function clonePlanningState(state: PlanningState): PlanningState {
     totalRequired: { ...state.totalRequired },
     missing: { ...state.missing },
     sources: { ...state.sources },
+    ungatherable: { ...state.ungatherable },
     requiresCraftingTable: state.requiresCraftingTable,
     operationCount: state.operationCount,
     preferenceCost: state.preferenceCost,
@@ -616,6 +641,12 @@ function normalizeItemName(name: string, itemsByName: Record<string, unknown>): 
   if (normalized.endsWith('_log') && itemsByName.log) return 'log';
   if (normalized.endsWith('_stem') && itemsByName.stem) return 'stem';
   return normalized;
+}
+
+function droppedByOtherBlock(registry: any, itemName: string, itemId: number | undefined): boolean {
+  if (itemId === undefined) return false;
+  return Object.entries(registry?.blocksByName ?? {})
+    .some(([name, block]: [string, any]) => name !== itemName && recipeDropIds(block).includes(itemId));
 }
 
 function sourceHint(registry: any, itemName: string, itemId: number | undefined): string {

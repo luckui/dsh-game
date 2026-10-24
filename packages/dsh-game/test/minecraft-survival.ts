@@ -15,6 +15,8 @@ import { MinecraftSession } from '../src/games/minecraft/session.js';
 import { rcon as rconRaw, type RconTarget } from '../src/games/minecraft/rcon.js';
 
 const ROOT = path.resolve(process.argv[2] ?? '.');
+/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量）、不填 = 全部 */
+const SUITE = process.argv[3] ?? 'all';
 const props = Object.fromEntries(
   fs.readFileSync(path.join(ROOT, '.mc-server', 'server.properties'), 'utf8').split(/\r?\n/)
     .filter((l) => l && !l.startsWith('#') && l.includes('='))
@@ -180,6 +182,123 @@ async function onArena(): Promise<void> {
   }
 }
 
+/** 边界情况用的场地：草地、沙砾、一棵树（树旁边地上有别的掉落物） */
+async function buildEdgeArena(): Promise<void> {
+  await rcon(`fill ${X + 2} ${Y} ${Z - 8} ${X + 8} ${Y} ${Z - 2} grass_block`);
+  await rcon(`fill ${X + 2} ${Y + 1} ${Z - 8} ${X + 8} ${Y + 1} ${Z - 2} short_grass`);
+  await rcon(`fill ${X - 9} ${Y + 1} ${Z + 5} ${X - 6} ${Y + 3} ${Z + 8} gravel`);
+  await rcon(`fill ${X + 2} ${Y + 1} ${Z + 7} ${X + 2} ${Y + 4} ${Z + 7} oak_log`);
+}
+
+/** 名字、配方回环、掉落和数量：她可能遇到的各种怪情况 */
+async function edgeCases(): Promise<void> {
+  await buildEdgeArena();
+  await reset();
+
+  begin('名字：老名字 grass（1.20.3 起改叫 short_grass）');
+  const grass = await act('collect', { name: 'grass', index: 1 });
+  check(/short_grass/.test(grass), `说清楚没有 grass，提到现在的名字 short_grass：${grass.slice(0, 200)}`);
+  await inventoryMatches();
+
+  begin('名字：要 stone（挖石头掉的是圆石）');
+  await rcon(`give ${NAME} stone_pickaxe 1`);
+  await rcon(`fill ${X + 5} ${Y + 1} ${Z + 4} ${X + 7} ${Y + 2} ${Z + 6} stone`);
+  await sleep(800);
+  const stone = await step('collect', { name: 'stone', index: 2 }, { ok: /：做完了|：只做了一部分|：没成/ });
+  note(`她看到的：${stone.slice(0, 200)}`);
+
+  begin('名字：含糊的 iron');
+  const iron = await act('collect', { name: 'iron', index: 1 });
+  check(!/：做完了/.test(iron) && /raw_iron|iron_ore|iron_ingot/.test(iron), `不假装做完，列出相近的名字：${iron.slice(0, 200)}`);
+
+  begin('名字：泛称 planks、老名字 wooden_planks');
+  await rcon(`give ${NAME} oak_log 4`);
+  await sleep(800);
+  const planks = await step('craft', { name: 'planks', index: 4 }, { ok: /：做完了|：没成/ });
+  note(`planks：${planks.slice(0, 200)}`);
+  check(/：做完了/.test(planks) || /oak_planks/.test(planks), `planks 要么做出来，要么列出 oak_planks 这类名字`);
+  const legacy = await act('craft', { name: 'wooden_planks', index: 4 });
+  check(!/超时/.test(legacy), `wooden_planks 有明确的结果：${legacy.slice(0, 200)}`);
+  await inventoryMatches();
+
+  begin('配方回环：没有铁锭和铁块，只有粗铁 → 铁锭要熔炼');
+  await reset();
+  await rcon(`give ${NAME} raw_iron 3`);
+  await rcon(`give ${NAME} coal 2`);
+  await rcon(`give ${NAME} furnace 1`);
+  await sleep(800);
+  await step('craft', { name: 'iron_ingot', index: 3 }, { gain: { iron_ingot: 3, raw_iron: -3 }, noDrops: true });
+
+  begin('配方回环：铁块拆成 9 个铁锭（不能在铁块和铁锭之间来回转）');
+  await reset();
+  await rcon(`give ${NAME} iron_block 1`);
+  await sleep(800);
+  await step('craft', { name: 'iron_ingot', index: 9 }, { gain: { iron_ingot: 9, iron_block: -1 }, noDrops: true });
+
+  begin('配方回环：铁锭不够做铁块，又没有粗铁（应该说缺什么，不能转圈）');
+  await reset();
+  await rcon(`give ${NAME} iron_ingot 4`);
+  await sleep(800);
+  const block = await step('craft', { name: 'iron_block', index: 1 }, { ok: /：没成/, gain: {} });
+  note(`她看到的：${block.slice(0, 200)}`);
+  check(!/missing[^）]*iron_block/.test(block) && /raw_iron|iron_ore/.test(block), '说出真正缺的（粗铁 / 铁矿），不是「缺铁块」');
+  check((await serverCount('iron_ingot')) === 4, `铁锭还是 4 个（${await serverCount('iron_ingot')}）`);
+
+  begin('配方链：只有粗铁和木棍 → 铁镐（先熔炼再合成）');
+  await reset();
+  await rcon(`give ${NAME} raw_iron 3`);
+  await rcon(`give ${NAME} stick 2`);
+  await rcon(`give ${NAME} coal 1`);
+  await rcon(`give ${NAME} furnace 1`);
+  await rcon(`give ${NAME} crafting_table 1`);
+  await sleep(800);
+  await step('craft', { name: 'iron_pickaxe', index: 1 }, { gain: { iron_pickaxe: 1, raw_iron: -3, stick: -2 }, noDrops: true });
+
+  begin('概率掉落：小麦种子（砍草不一定出种子）');
+  await reset();
+  const seeds = await step('collect', { name: 'wheat_seeds', index: 2 }, { ok: /：做完了/ });
+  note(`她看到的：${seeds.slice(0, 220)}`);
+  const seedCount = await serverCount('wheat_seeds');
+  check(/做完了/.test(seeds) ? seedCount >= 2 : true, `种子 ${seedCount} 个；说「做完了」时至少 2 个`);
+  check(/collected [\d/]+ wheat_seeds by breaking \d+ short_grass/.test(seeds), '分得清：拿到几个种子、砍了几株草');
+
+  begin('概率掉落：燧石（沙砾 10% 出燧石）');
+  await rcon(`give ${NAME} wooden_shovel 1`);
+  await sleep(800);
+  const flint = await step('collect', { name: 'flint', index: 1 }, { ok: /：做完了/ });
+  note(`她看到的：${flint.slice(0, 220)}`);
+  check(/collected [\d/]+ flint by breaking \d+ gravel/.test(flint), '分得清：拿到几个燧石、挖了几块沙砾');
+
+  begin('杀羊：杀了几只 和 拿到几块羊毛、几块肉 是两回事');
+  await reset();
+  await rcon(`give ${NAME} iron_sword 1`);
+  await rcon(`summon sheep ${X - 3} ${Y + 1} ${Z - 3} {Color:0b}`);
+  await rcon(`summon sheep ${X - 4} ${Y + 1} ${Z - 2} {Color:0b}`);
+  await sleep(1000);
+  const sheep = await step('attack', { name: 'sheep', index: 2 }, { ok: /：做完了/ });
+  note(`她看到的：${sheep.slice(0, 220)}`);
+  check(/2\/2 sheep|killed 2/.test(sheep), '说清楚杀了 2 只');
+  const woolGot = await serverCount('white_wool');
+  check(woolGot >= 2, `两只羊的羊毛都捡了（${woolGot}）`);
+  if (woolGot < 2) note(`场地附近地上的东西：${await rcon(`execute as @e[type=item,x=${X},y=${Y},z=${Z},distance=..30] run data get entity @s Pos`)} / ${await rcon(`execute as @e[type=item,x=${X},y=${Y},z=${Z},distance=..30] run data get entity @s Item.id`)}`);
+  check((await droppedNearby()) === 0, `地上没落下东西（还有 ${await droppedNearby()} 个）`);
+
+  begin('要羊毛：附近没有羊毛方块（羊毛来自羊）');
+  await rcon(`summon sheep ${X - 3} ${Y + 1} ${Z - 3} {Color:0b}`);
+  await sleep(800);
+  const wool = await act('collect', { name: 'white_wool', index: 1 });
+  check(!/超时/.test(wool), `有个明确的结果：${wool.slice(0, 220)}`);
+  await inventoryMatches();
+  await rcon(`kill @e[type=sheep,x=${X},y=${Y},z=${Z},distance=..30]`);
+
+  begin('砍树：旁边地上有别的东西，报的背包变化要和真实一致');
+  await reset();
+  await rcon(`summon item ${X + 2} ${Y + 1} ${Z + 5} {Item:{id:"minecraft:stick",count:3}}`);
+  await rcon(`summon item ${X + 3} ${Y + 1} ${Z + 6} {Item:{id:"minecraft:apple",count:1}}`);
+  await sleep(500);
+  await step('collect', { name: 'oak_log', index: 4 }, { atLeast: { oak_log: 4 } });
+}
+
 async function reset(): Promise<void> {
   await rcon(`clear ${NAME}`);
   await rcon(`effect clear ${NAME}`);
@@ -203,7 +322,20 @@ async function main(): Promise<void> {
     await rcon(`kill @e[type=!player,x=${X},y=${Y},z=${Z},distance=..40]`);
     await reset();
     await sleep(2000);
+    if (SUITE !== 'edge') await basicCases();
+    if (SUITE !== 'basic') await edgeCases();
+  } finally {
+    await session.stop().catch(() => {});
+    await rcon(`forceload remove ${X - 16} ${Z - 16} ${X + 16} ${Z + 16}`);
+    await rcon(`gamerule doMobSpawning ${mobSpawning}`);
+    await rcon('time set day');
+  }
+  report();
+}
 
+/** 基本操作：采集、合成、熔炼、排队、放置、寻找、装备、丢捡、战斗、吃、躲、睡、逃、停 */
+async function basicCases(): Promise<void> {
+  {
     begin('采集原木');
     await step('collect', { name: 'oak_log', index: 5 }, { atLeast: { oak_log: 5 } });
 
@@ -334,13 +466,10 @@ async function main(): Promise<void> {
     const cursor = await body().command<any>('hud-state', {}, 5000);
     check(!!cursor, '停下以后身体还在');
     await inventoryMatches();
-  } finally {
-    await session.stop().catch(() => {});
-    await rcon(`forceload remove ${X - 16} ${Z - 16} ${X + 16} ${Z + 16}`);
-    await rcon(`gamerule doMobSpawning ${mobSpawning}`);
-    await rcon('time set day');
   }
+}
 
+function report(): void {
   console.log('\n========== 结果');
   for (const r of results) console.log(`${r.ok ? '通过' : '失败'}  ${r.name}${r.notes.length ? `\n      ${r.notes.join('\n      ')}` : ''}`);
   const failed = results.filter((r) => !r.ok).length;

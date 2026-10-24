@@ -16,7 +16,7 @@ import {
 } from './craftPlanner.js';
 import { gatherWood } from './gatherWood.js';
 import { fleeFromHostiles, hideUnderground, sleepInBed, swimToShore } from './survival.js';
-import { placeBlockAt as airiPlaceBlockAt, breakBlockAt, isReplaceableForPlacement, type PlaceFace } from './placeBlock.js';
+import { placeBlockAt as airiPlaceBlockAt, breakBlockAt, isInteractive, isReplaceableForPlacement, type PlaceFace } from './placeBlock.js';
 import { Vec3 } from 'vec3';
 import { runAdaptiveCollection } from './collectionStrategy.js';
 import type {
@@ -865,6 +865,7 @@ export function createMineflayerAdapter(
 
     if (woodName) {
       const started = Date.now();
+      const before = inventoryCounts(current);
       const result = await (dependencies.gatherWood ?? gatherWood)(
         current,
         options.maxCount,
@@ -881,9 +882,8 @@ export function createMineflayerAdapter(
         outcome: result.collected >= options.maxCount ? 'succeeded' : 'partial',
         summary: `collected ${result.collected} logs (requested at least ${options.maxCount})`,
         durationMs: Date.now() - started,
-        inventoryDelta: Object.keys(result.broken).length
-          ? result.broken
-          : { log: result.collected },
+        // 背包里真实多了什么（顺手捡到的树苗、木棍、苹果也算），砍了哪些方块在 worldChanges 里
+        inventoryDelta: inventoryDifference(before, inventoryCounts(current)),
         worldChanges: Object.entries(result.broken).map(([name, count]) => ({
           kind: 'block_broken' as const,
           name,
@@ -900,6 +900,11 @@ export function createMineflayerAdapter(
       };
     }
 
+    // 名字在这个版本里既不是物品也不是方块（改过名、写错、太笼统）：直接说，附上相近的名字
+    const lookup = requestedItem ?? requestedBlock;
+    if (lookup && !current.registry?.itemsByName?.[lookup] && !current.registry?.blocksByName?.[lookup]) {
+      return actionFailure('', unknownNameText(current, lookup), 'unknown_item');
+    }
     const targetItem = requestedItem
       ?? (requestedBlock ? deriveDropItemForBlock(current, requestedBlock) : undefined);
     if (!targetItem) throw new Error('Missing Minecraft parameter: block or item');
@@ -924,6 +929,8 @@ export function createMineflayerAdapter(
     let missingToolTotal = 0;
     let observedTargetCount = before[targetItem] ?? 0;
     let sweepNumber = 0;
+    // 按概率掉的（砍草出种子约 1/8、沙砾出燧石 1/10）：一轮多挖几块，不然轮数用完也挖不了几块
+    const chancy = chanceDropSources(current, targetItem).length > 0;
     const collection = await runAdaptiveCollection({
       targetCount: options.maxCount,
       initialRadius: options.radius,
@@ -934,7 +941,7 @@ export function createMineflayerAdapter(
         sweepNumber += 1;
         const swept = await collectBlocks({
           blocks: sourceBlocks,
-          quantity,
+          quantity: chancy ? quantity * 8 : quantity,
           radius,
           signal: options.signal,
         });
@@ -967,6 +974,8 @@ export function createMineflayerAdapter(
     const after = inventoryCounts(current);
     const gained = Math.max(0, (after[targetItem] ?? 0) - (before[targetItem] ?? 0));
     const sourceText = sourceBlocks.join(', ');
+    // 实际挖了哪些（「挖了 12 块 gravel」），没挖到时写可能的来源
+    const brokenText = Object.entries(brokenByName).map(([name, count]) => `${count} ${name}`).join(', ') || `0 blocks (sources: ${sourceText})`;
     const worldChanges: MinecraftActionResult['worldChanges'] = Object.entries(brokenByName).map(([name, count]) => ({
       kind: 'block_broken',
       name,
@@ -998,8 +1007,11 @@ export function createMineflayerAdapter(
       actionId: '',
       outcome: reached ? 'succeeded' : 'partial',
       summary: reached
-        ? `collected ${gained} ${targetItem} by breaking ${brokenTotal} ${sourceText}`
-        : `collected ${gained}/${options.maxCount} ${targetItem} by breaking ${brokenTotal} ${sourceText}${missingToolText}${skippedText}${missingToolTotal === 0 && skippedTotal === 0 ? `; no more ${sourceText} nearby, consider searching another area` : ''}`,
+        ? `collected ${gained} ${targetItem} by breaking ${brokenText}`
+        : `collected ${gained}/${options.maxCount} ${targetItem} by breaking ${brokenText}${missingToolText}${skippedText}${
+          collection.stoppedBy === 'sweeps'
+            ? `; stopped after ${collection.sweeps} rounds (there may be more ${sourceText} around${chancy ? `; ${targetItem} only drops sometimes` : ''})`
+            : missingToolTotal === 0 && skippedTotal === 0 ? `; no more ${sourceText} within ${collection.finalRadius} blocks, consider searching another area` : ''}`,
       durationMs: Date.now() - started,
       inventoryDelta: inventoryDifference(before, after),
       worldChanges,
@@ -1019,10 +1031,13 @@ export function createMineflayerAdapter(
     const before = inventoryCounts(current);
     let plan = planCraft(current, options.item, quantity);
     if (!plan.recipeAvailable) {
+      const name = normalizeMinecraftLookupName(options.item);
       return {
         actionId: '',
         outcome: 'failed',
-        summary: `cannot craft ${options.item}: unknown item`,
+        summary: current.registry?.itemsByName?.[name]
+          ? `${name} has no crafting recipe (it is collected, smelted or dropped by mobs, not crafted)`
+          : unknownNameText(current, name),
         durationMs: Date.now() - started,
         inventoryDelta: {},
         worldChanges: [],
@@ -1835,10 +1850,11 @@ export function createMineflayerAdapter(
   }
 
   function findAutoPlacement(current: any): { target: Vec3; spec: { reference: any; faceVector: Vec3 } } | undefined {
+    // 不放在熔炉、箱子、工作台这类能右键打开的方块上：对着它们放会打开它们的界面
     const ground = findFreePlacePosition(current, 6);
     if (ground) {
       const spec = resolvePlacementSpec(current, ground, 'top');
-      if (spec) return { target: ground, spec };
+      if (spec && !isInteractive(spec.reference)) return { target: ground, spec };
     }
     // 墙面兜底（对齐 AIRI findPlacementSpot）：找"落点可放置且至少一侧有实心参考"的最近点
     const own = current.entity?.position;
@@ -1853,7 +1869,7 @@ export function createMineflayerAdapter(
         for (let dy = -1; dy <= 1; dy += 1) {
           const target = new Vec3(baseX + dx, baseY + dy, baseZ + dz);
           const spec = resolveAutoPlacementSpec(current, target);
-          if (!spec) continue;
+          if (!spec || isInteractive(spec.reference)) continue;
           candidates.push({ target, spec, distance: distanceToBot(current, target) });
         }
       }
@@ -2398,6 +2414,14 @@ export function createMineflayerAdapter(
       return swimToShore(requireBot(bot));
     },
 
+    async closeStrayWindow() {
+      const window = bot?.currentWindow;
+      if (!window) return;
+      emit({ kind: 'log', level: 'warn', message: `[window] ${window.type ?? 'a window'} was left open after an action; closing it` });
+      if (window.selectedItem) await bot.putSelectedItemRange(window.inventoryStart, window.inventoryEnd, window, null).catch(() => {});
+      bot.closeWindow(window);
+    },
+
     hudState() {
       if (!bot?.entity) return null;
       const slots: any[] = bot.inventory?.slots ?? [];
@@ -2710,7 +2734,9 @@ export function createMineflayerAdapter(
 
       throwIfAborted(options.signal);
       report('info', `collecting drops after ${confirmed} confirmed kills`);
-      const pickedDrops = await (dependencies.collectDrops ?? collectNearbyDrops)(current, 10, options.signal);
+      // 生物死了要播完倒下的动画（约 1 秒）才掉东西：等它掉出来再去捡，不然最后一只的掉落物会被落下
+      if (confirmed > 0) await delay(1200, options.signal);
+      const pickedDrops = await (dependencies.collectDrops ?? collectNearbyDrops)(current, 16, options.signal);
       const inventoryDelta = inventoryDifference(before, inventoryCounts(current));
       const complete = options.kill ? confirmed >= options.quantity : attacked > 0;
       return {
@@ -3067,6 +3093,30 @@ function blockDropIds(block: any): number[] {
   return ids;
 }
 
+/**
+ * 按概率掉的东西：minecraft-data 的掉落表只列方块的「本体掉落」，这些不在里面（砍草出种子、挖沙砾出燧石、树叶出树苗和苹果……）。
+ * 和掉落表查出来的来源合在一起；不在这个版本里的方块名自动跳过
+ */
+const CHANCE_DROP_SOURCES: Record<string, string[]> = {
+  // 老版本（1.11.2）里 'grass' 是实心草方块，不产种子：只取非实心的草株
+  wheat_seeds: ['short_grass', 'tall_grass', 'grass', 'tallgrass', 'fern', 'large_fern', 'double_plant'],
+  flint: ['gravel'],
+  apple: ['oak_leaves', 'dark_oak_leaves'],
+  string: ['cobweb'],
+  glowstone_dust: ['glowstone'],
+  melon_slice: ['melon'],
+};
+
+function chanceDropSources(bot: any, itemName: string): string[] {
+  const blocksByName = bot.registry?.blocksByName ?? {};
+  // 树苗：同名的树叶（oak_sapling ← oak_leaves）
+  const leaves = itemName.endsWith('_sapling') ? [itemName.replace(/_sapling$/, '_leaves')] : [];
+  return [...(CHANCE_DROP_SOURCES[itemName] ?? []), ...leaves].filter((name) => {
+    const block = blocksByName[name];
+    return block && !(itemName === 'wheat_seeds' && block.boundingBox === 'block');
+  });
+}
+
 function sourceBlocksForItem(bot: any, itemName: string): string[] {
   const registry = bot.registry;
   const item = registry?.itemsByName?.[itemName];
@@ -3076,16 +3126,7 @@ function sourceBlocksForItem(bot: any, itemName: string): string[] {
         .map(([name]) => name)
         .filter((name) => name !== 'air' && name !== 'cave_air' && name !== 'void_air')
     : [];
-  if (blocks.length > 0) return blocks;
-  if (itemName === 'wheat_seeds') {
-    // 老版本（1.11.2）里 'grass' 是实心草方块，不产种子；只有非实心草株才可能是种子来源
-    return ['tallgrass', 'grass', 'tall_grass', 'short_grass', 'fern', 'double_plant']
-      .filter((name) => {
-        const block = registry?.blocksByName?.[name];
-        return block && block.boundingBox !== 'block';
-      });
-  }
-  return [];
+  return [...new Set([...blocks, ...chanceDropSources(bot, itemName)])];
 }
 
 function nearestVisibleLogName(bot: any, radius: number): string | null {
@@ -3273,6 +3314,25 @@ function entityMatches(entity: any, normalized: string | undefined): boolean {
     .some((value) => value === normalized);
 }
 
+/** 「这个版本里没有叫 X 的东西」加上相近的名字（含有这个词的物品 / 方块，短的、整词对上的排前面） */
+function unknownNameText(bot: any, name: string): string {
+  const names = new Set([...Object.keys(bot.registry?.itemsByName ?? {}), ...Object.keys(bot.registry?.blocksByName ?? {})]);
+  const words = name.split('_').filter((w) => w.length >= 3);
+  const score = (candidate: string): number => {
+    const parts = candidate.split('_');
+    if (candidate.includes(name)) return 3;
+    const hits = words.filter((w) => parts.includes(w)).length;
+    return hits === words.length && hits > 0 ? 2 : hits > 0 ? 1 : 0;
+  };
+  const similar = [...names]
+    .map((n) => ({ n, s: score(n) }))
+    .filter((c) => c.s > 0 && !c.n.includes('air'))
+    .sort((a, b) => b.s - a.s || a.n.length - b.n.length)
+    .slice(0, 8)
+    .map((c) => c.n);
+  return `no item or block is called "${name}" in Minecraft ${bot.version ?? ''}${similar.length ? `; similar names: ${similar.join(', ')}` : ''}`;
+}
+
 function actionFailure(
   actionId: string,
   message: string,
@@ -3381,12 +3441,19 @@ async function walkPickupDrops(
   const attempted = new Set<string>();
   let picked = 0;
   let found = 0;
+  let rescanned = false;
   for (let index = 0; index < 32; index += 1) {
     throwIfAborted(signal);
     const item = matchingEntities(bot, 'item', radius).find(
       (candidate) => !attempted.has(entityKey(candidate)),
     );
-    if (!item) break;
+    if (!item) {
+      // 刚挖掉、刚打死的东西可能还没掉出来：再等一下看一次
+      if (rescanned) break;
+      rescanned = true;
+      await delay(800, signal);
+      continue;
+    }
     found += 1;
     attempted.add(entityKey(item));
     try {
@@ -3535,6 +3602,18 @@ async function collectSugarCane(
 }
 
 async function collectSingleBlock(current: any, block: any, signal?: AbortSignal): Promise<void> {
+  // 没有碰撞箱的方块（草、花、庄稼）：collectblock 要走到「看得见它」的位置，视线检测打不中它们，寻路永远找不到。
+  // 走到旁边直接挖（掉落物由后面统一捡）
+  if (block.boundingBox === 'empty') {
+    if (current.entity.position.distanceTo(block.position.offset(0.5, 0.5, 0.5)) > 4) {
+      const r = await patchedGoto(current, new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2), { signal });
+      if (!r.ok) throw new Error(`cannot reach ${block.name}: ${r.message}`);
+    }
+    const now = current.blockAt(block.position);
+    if (!now || now.name !== block.name) throw new Error(`${block.name} is already gone`);
+    await current.dig(now, true);
+    return;
+  }
   const task = current.collectBlock.collect(block, { ignoreNoPath: true });
   await runAbortableOperation(
     task,

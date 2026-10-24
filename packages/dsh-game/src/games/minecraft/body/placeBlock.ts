@@ -104,13 +104,23 @@ function findPlacementSpot(
     : placeOn === 'side'
       ? [DIRS.north, DIRS.south, DIRS.east, DIRS.west, DIRS.top, DIRS.bottom]
       : [DIRS[placeOn], ...Object.values(DIRS).filter((dir) => dir !== DIRS[placeOn])]
+  // 能右键打开的方块（熔炉、箱子、工作台、床、门……）排到最后：对着它们放，不蹲着就是打开它们
+  let fallback: { buildOffBlock: any; faceVec: Vec3 } | null = null
   for (const dir of dirs) {
     const block = current.blockAt(target.plus(dir))
     if (block && !isReplaceableForPlacement(block)) {
-      return { buildOffBlock: block, faceVec: dir.scaled(-1) }
+      if (!isInteractive(block)) return { buildOffBlock: block, faceVec: dir.scaled(-1) }
+      fallback ??= { buildOffBlock: block, faceVec: dir.scaled(-1) }
     }
   }
-  return null
+  return fallback
+}
+
+/** 右键会打开界面或者改变状态的方块 */
+const INTERACTIVE = /crafting_table|furnace|smoker|chest|barrel|shulker_box|_bed$|door|fence_gate|lever|button|anvil|enchanting_table|brewing_stand|grindstone|stonecutter|loom|cartography_table|smithing_table|crafter|hopper|dispenser|dropper|beacon|note_block|jukebox|repeater|comparator|daylight_detector|cake|bell|lectern|composter|respawn_anchor|_sign$|flower_pot|command_block|chiseled_bookshelf/
+
+export function isInteractive(block: any): boolean {
+  return INTERACTIVE.test(String(block?.name ?? ''))
 }
 
 async function moveIntoPosition(current: any, blockName: string, target: Vec3, signal?: AbortSignal): Promise<void> {
@@ -148,7 +158,17 @@ async function tryPlaceBlock(
 ): Promise<void> {
   await current.equip(item, 'hand')
   await current.lookAt(buildOffBlock.position)
-  await current.placeBlock(buildOffBlock, faceVec)
+  // 对着能右键打开的方块放：和玩家一样蹲着放，不然打开的是它的界面
+  const sneak = isInteractive(buildOffBlock)
+  if (sneak) {
+    current.setControlState('sneak', true)
+    await sleep(150, signal)
+  }
+  try {
+    await current.placeBlock(buildOffBlock, faceVec)
+  } finally {
+    if (sneak) current.setControlState('sneak', false)
+  }
   await sleep(200, signal)
 }
 
