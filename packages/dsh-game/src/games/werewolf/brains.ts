@@ -36,7 +36,7 @@ export function userPrompt(view: SeatView, request: DecisionRequest): string {
   return [
     view.text,
     '',
-    `【现在轮到你】你是 ${view.no} 号（${ROLE_NAMES[view.role]}）。${request.ask}`,
+    `【现在轮到你】你是 ${view.no} 号（${ROLE_NAMES[view.role]}）${view.mates ? `，你的狼队友是 ${view.mates}` : ''}。${request.ask}`,
     request.options.length ? `可以选的座位号：${request.options.join('、')}。` : '',
     `输出格式：${FORMAT[request.kind]}`,
   ].filter(Boolean).join('\n');

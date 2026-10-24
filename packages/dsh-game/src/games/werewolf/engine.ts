@@ -44,6 +44,8 @@ export interface SeatView {
   role: Role;
   /** 规则、身份、私密信息、公开发生的事，整理成文字 */
   text: string;
+  /** 狼人：狼队友（座位号 + 名字，死了的注明） */
+  mates?: string;
 }
 
 export interface Brain {
@@ -184,7 +186,10 @@ export class WerewolfEngine {
     const wolves = this.seats.filter((s) => s.role === 'wolf').map((s) => s.no);
     this.notes = this.seats.map((s) => {
       const own = [`你是 ${s.no} 号 ${s.name}，你的身份是${ROLE_NAMES[s.role]}。`];
-      if (s.role === 'wolf') own.push(`你的狼队友是 ${wolves.filter((n) => n !== s.no).map((n) => this.label(n)).join('、')}。`);
+      if (s.role === 'wolf') {
+        own.push(`你的狼队友是 ${wolves.filter((n) => n !== s.no).map((n) => this.label(n)).join('、')}，你们是同一阵营，他们每出局一个，狼队就少一份力量。`);
+        own.push('狼队的常见打法：派一只狼白天悍跳预言家，给好人报「查杀」、给狼队友报「金水」，和真预言家对跳，让好人分不清；队友眼看要被放逐时，跟着投他（倒钩）能换来自己的清白；夜里优先刀神职，尤其是已经跳出来的预言家。');
+      }
       return own;
     });
   }
@@ -218,11 +223,15 @@ export class WerewolfEngine {
       ...this.notes[no - 1],
       '',
       `【现在】第 ${this.day} 天${this.phase === 'night' ? '的夜晚' : '白天'}。活着的人：${alive}。`,
+      ...(this.publicLog.length ? [] : ['这是第一夜：还没有任何人发过言、投过票，你对其他玩家只知道座位号和名字，今晚的选择没有依据，凭直觉就好。']),
       '',
       '【所有人都知道的事】',
       ...(this.publicLog.length ? this.publicLog : ['（还没有）']),
     ].join('\n');
-    return { no, character: this.characters[no - 1], role: seat.role, text };
+    const mates = seat.role === 'wolf'
+      ? this.seats.filter((s) => s.role === 'wolf' && s.no !== no).map((s) => `${this.label(s.no)}${s.alive ? '' : '（已出局）'}`).join('、')
+      : undefined;
+    return { no, character: this.characters[no - 1], role: seat.role, text, ...(mates ? { mates } : {}) };
   }
 
   private emit(entry: WolfEntry): void {
@@ -305,7 +314,10 @@ export class WerewolfEngine {
     await this.narrate('狼人请睁眼，商量今晚要杀谁。');
     const wolves = this.alive('wolf');
     for (const wolf of wolves) {
-      const d = await this.ask(wolf.no, { kind: 'wolf_chat', ask: '对狼队友说一句话（只有狼人能听到）：今晚想杀谁、为什么，或者白天打算怎么演。', options: everyone });
+      const ask = this.publicLog.length
+        ? '对狼队友说一句话（只有狼人能听到）：今晚想杀谁、为什么，或者白天打算怎么演。'
+        : '对狼队友说一句话（只有狼人能听到）：大家还没开口，可以商量今晚刀谁、白天怎么演、要不要派人悍跳预言家。';
+      const d = await this.ask(wolf.no, { kind: 'wolf_chat', ask, options: everyone });
       const text = d.text?.trim();
       if (text) {
         this.emit({ kind: 'wolf_chat', seat: wolf.no, text });
@@ -414,28 +426,32 @@ export class WerewolfEngine {
       await this.hooks.checkpoint('speech');
     }
 
-    // 投票
+    // 投票；平票进入 PK：平票的人各再发言一次，其余人只在他们中间重投，再平就没人出局
     this.phase = 'vote';
     await this.narrate('发言结束，请投票。');
-    const voters = this.alive();
-    const ballots = await Promise.all(voters.map((s) => this.ask(s.no, { kind: 'vote', ask: '投票放逐一个人（填座位号），也可以弃票。', options: voters.map((v) => v.no).filter((n) => n !== s.no) })));
-    const votes: Record<number, number | null> = {};
-    voters.forEach((s, i) => (votes[s.no] = ballots[i].target ?? null));
-    // 一张一张揭晓：先念这个人的心声，再画他投给谁
-    for (const [i, s] of voters.entries()) {
-      if (this.stopped) return;
-      await this.hooks.perform({ act: 'vote', seats: [s.no], target: votes[s.no], inner: innerOf(s.no, ballots[i]), public: true });
+    let exiled: number | null = null;
+    const first = await this.ballot(this.alive(), null);
+    if (first.length === 1) exiled = first[0];
+    else if (first.length > 1) {
+      const pk = [...first].sort((a, b) => a - b);
+      await this.narrate(`${pk.map((n) => this.label(n)).join('、')} 平票，进入 PK。请平票的人依次再发言一次。`);
+      this.publicLog.push(`第 ${this.day} 天：${pk.map((n) => this.label(n)).join('、')} 平票，进入 PK。`);
+      this.phase = 'day';
+      for (const n of pk) {
+        if (this.stopped) return;
+        const others = pk.filter((m) => m !== n).map((m) => this.label(m)).join('、');
+        const d = await this.ask(n, { kind: 'speech', ask: `你和 ${others} 平票，现在是 PK 发言（所有人都能听到）：说服大家别投你。`, options: [] });
+        await this.hooks.perform({ act: 'speak', seats: [n], inner: innerOf(n, d), public: true });
+        await this.say(n, d.text, false);
+        await this.hooks.checkpoint('speech');
+      }
+      this.phase = 'vote';
+      await this.narrate(`PK 发言结束，其余的人在 ${pk.map((n) => `${n} 号`).join('、')} 之间重新投票。`);
+      const again = await this.ballot(this.alive().filter((s) => !pk.includes(s.no)), pk);
+      if (again.length === 1) exiled = again[0];
     }
-    const count = new Map<number, number>();
-    for (const t of Object.values(votes)) if (t) count.set(t, (count.get(t) ?? 0) + 1);
-    const max = count.size ? Math.max(...count.values()) : 0;
-    const top = [...count.entries()].filter(([, c]) => c === max).map(([n]) => n);
-    const exiled = top.length === 1 ? top[0] : null;
-    this.votes = votes;
-    this.emit({ kind: 'vote', votes, exiled });
-    const summary = voters.map((s) => `${s.no}→${votes[s.no] ?? '弃'}`).join('，');
-    this.publicLog.push(`第 ${this.day} 天投票：${summary}。${exiled ? `${this.label(exiled)} 被放逐。` : '平票，没有人被放逐。'}`);
-    await this.narrate(exiled ? `投票结果：${this.label(exiled)} 得票最多，被放逐。` : '平票，今天没有人被放逐。');
+    if (this.stopped) return;
+    await this.narrate(exiled ? `投票结果：${this.label(exiled)} 得票最多，被放逐。` : first.length ? '还是平票，今天没有人被放逐。' : '没有人投票，今天没有人被放逐。');
     await this.hooks.checkpoint('vote');
     if (exiled) {
       this.kill([exiled], 'vote');
@@ -443,6 +459,36 @@ export class WerewolfEngine {
       if (this.seats[exiled - 1].role === 'hunter') await this.hunterShot(exiled);
     }
     this.checkWinner();
+  }
+
+  /**
+   * 一轮投票：voters 投，candidates 是只能投的人（null = 除自己外活着的都能投）。
+   * 一张一张揭晓、记进公开记录；返回得票最多的人（一个 = 放逐，几个 = 平票，空 = 都弃票）
+   */
+  private async ballot(voters: SeatState[], candidates: number[] | null): Promise<number[]> {
+    const pk = candidates !== null;
+    const ballots = await Promise.all(voters.map((s) => this.ask(s.no, {
+      kind: 'vote',
+      ask: pk ? `PK 重投：只能在 ${candidates.map((n) => this.label(n)).join('、')} 之间投（填座位号），也可以弃票。` : '投票放逐一个人（填座位号），也可以弃票。',
+      options: pk ? candidates : voters.map((v) => v.no).filter((n) => n !== s.no),
+    })));
+    const votes: Record<number, number | null> = {};
+    voters.forEach((s, i) => (votes[s.no] = ballots[i].target ?? null));
+    // 一张一张揭晓：先念这个人的心声，再画他投给谁
+    for (const [i, s] of voters.entries()) {
+      if (this.stopped) return [];
+      await this.hooks.perform({ act: 'vote', seats: [s.no], target: votes[s.no], inner: innerOf(s.no, ballots[i]), public: true });
+    }
+    const count = new Map<number, number>();
+    for (const t of Object.values(votes)) if (t) count.set(t, (count.get(t) ?? 0) + 1);
+    const max = count.size ? Math.max(...count.values()) : 0;
+    const top = [...count.entries()].filter(([, c]) => c === max).map(([n]) => n);
+    this.votes = votes;
+    this.emit({ kind: 'vote', votes, exiled: top.length === 1 ? top[0] : null });
+    const summary = voters.map((s) => `${s.no}→${votes[s.no] ?? '弃'}`).join('，');
+    const result = top.length === 1 ? `${this.label(top[0])} 得票最多。` : top.length ? `${top.map((n) => this.label(n)).join('、')} 平票。` : '全部弃票。';
+    this.publicLog.push(`第 ${this.day} 天${pk ? ' PK 重投' : '投票'}：${summary}。${result}`);
+    return top;
   }
 
   private async lastWords(no: number): Promise<void> {

@@ -154,7 +154,14 @@ export class WerewolfSession implements GameSession {
     const ownerTurn: OwnerTurn | null = pending
       ? { kind: pending.request.kind, ask: pending.request.ask, options: pending.request.options, actions: this.actionsOf(pending.request), ...(pending.request.witch ? { witch: pending.request.witch } : {}) }
       : null;
-    return { ...state, view: this.view, ownerSeat: this.ownerSeat, ownerTurn, ownerNotes: this.engine?.notesOf(this.ownerSeat) ?? [] };
+    return { ...state, thinking: this.thinkingSeenByOwner(state), view: this.view, ownerSeat: this.ownerSeat, ownerTurn, ownerNotes: this.engine?.notesOf(this.ownerSeat) ?? [] };
+  }
+
+  /** 夜里谁在想就是谁的身份：主人只看得到自己，是狼人时再加狼人回合的狼队友；白天发言、投票是公开的 */
+  private thinkingSeenByOwner(state: WolfState): number[] {
+    if (state.phase !== 'night') return state.thinking;
+    const ownerIsWolf = state.seats[this.ownerSeat - 1]?.role === 'wolf';
+    return state.thinking.filter((n) => n === this.ownerSeat || (ownerIsWolf && state.step === 'wolf' && state.seats[n - 1]?.role === 'wolf'));
   }
 
   private pushState(): void {
