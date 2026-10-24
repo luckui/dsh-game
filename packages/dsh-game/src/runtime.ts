@@ -157,6 +157,8 @@ export interface LiveBody {
 
 /** Minecraft 摄像机客户端自己的游戏目录（设置、日志、HUD 的贴图和状态） */
 export const minecraftCameraDir = (): string => path.join(process.env.DSH_HOME ?? os.tmpdir(), 'dsh-game', 'mc-camera');
+/** 世界日志（一个服务器上的一个她一本） */
+export const minecraftJournalDir = (): string => path.join(process.env.DSH_HOME ?? os.tmpdir(), 'dsh-game', 'minecraft-worlds');
 
 /** 现在在直播吗（直播插件在、而且在播） */
 export const onAir = (): LiveBody | null => {
@@ -417,6 +419,7 @@ export const GAMES = {
         log: (text) => console.log(text),
         onStateChange: () => announceGameState(),
         rcon: setup.rconPassword ? { host: setup.host, port: setup.rconPort, password: setup.rconPassword } : null,
+        journalDir: minecraftJournalDir(),
         // 开局前先查一遍开局设置（她自己调 game_start 时也一样），没过就不开
         preflight: () => mcSetup.check().then((c) => c.problem),
         record,

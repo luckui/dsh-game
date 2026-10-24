@@ -12,9 +12,10 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import z from '@deepseek-ai/schemastery';
-import { GAMES, mcSetup, minecraftCameraDir, assetsDir, audio, bindSettings, clipsDir, STEAM_ART, games, hooks, listeners, settings, speeches, watchFrames, wolfSetup, type ArtKind, type GameId, type LiveBody, type Settings, type StageEvent } from './runtime.js';
+import { GAMES, mcSetup, minecraftCameraDir, minecraftJournalDir, assetsDir, audio, bindSettings, clipsDir, STEAM_ART, games, hooks, listeners, settings, speeches, watchFrames, wolfSetup, type ArtKind, type GameId, type LiveBody, type Settings, type StageEvent } from './runtime.js';
 import type { WolfSetup } from './games/werewolf/setup.js';
 import type { McSetup } from './games/minecraft/setup.js';
+import { WorldJournal } from './games/minecraft/journal.js';
 import { DEFAULT_VOICE } from './tts.js';
 import { deleteCharacter, findDdlcDir } from './games/ddlc/profile.js';
 import { WerewolfSession, devOptions } from './games/werewolf/session.js';
@@ -229,6 +230,19 @@ export function apply(ctx: HostContext, config: LiveConfig = {}): void {
     }
     return new Response(JSON.stringify(await mcSetup.check()), { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
   }, 'dsh-game minecraft setup');
+
+  // Minecraft 的世界日志（开局设置里的服务器 + 她的名字那一本）：GET 读；DELETE 清空（旧的改名留着）。这局正开着时不能清
+  route('/api/dsh-game/mc-journal', ['GET', 'DELETE'], async (request) => {
+    const setup = mcSetup.load();
+    const server = `${setup.host}:${setup.port}`;
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+    if (request.method === 'DELETE') {
+      const state = games.state();
+      if (state.game === 'minecraft' && state.status !== 'none' && state.status !== 'finished') return json({ error: '这局 Minecraft 还开着，结束了再清空' }, 409);
+      WorldJournal.clear(minecraftJournalDir(), server, setup.username);
+    }
+    return json({ server, username: setup.username, text: WorldJournal.read(minecraftJournalDir(), server, setup.username) });
+  }, 'dsh-game minecraft journal');
 
   // 狼人杀的开局设置：GET 读设置和检查结果；PUT 存了再检查一遍
   route('/api/dsh-game/wolf-setup', ['GET', 'PUT'], async (request) => {

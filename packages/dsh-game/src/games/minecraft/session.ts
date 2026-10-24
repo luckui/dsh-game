@@ -18,6 +18,7 @@ import { rcon, rconBatch, type RconTarget } from './rcon.js';
 import { CameraClient, findJava, findMinecraftRoot } from './camera.js';
 import { TEMPLATES, clearCells, describeBlueprint, ghostCells, materials, parseBlueprint, placements, type Blueprint } from './blueprint.js';
 import { GhostBuild } from './ghost.js';
+import { WorldJournal } from './journal.js';
 
 export interface MinecraftOptions {
   /** 打包好的身体子进程（lib/minecraft-worker.cjs） */
@@ -37,10 +38,17 @@ export interface MinecraftOptions {
   onStateChange?: () => void;
   /** 自己服务器的 RCON：有的话，旁观的玩家会被自动挂到她身上（她复活、换维度、对方被甩开时重新挂） */
   rcon?: RconTarget | null;
+  /** 世界日志放在哪（一个服务器上的一个她一本，见 journal.ts）；不给就不记 */
+  journalDir?: string | null;
 }
 
 /** 隔多久把旁观者重新挂一次（对方按了 Shift 被甩开时，最多这么久就挂回来） */
 const RESPECTATE_MS = 30_000;
+
+type JournalMeta =
+  | { kind: 'build'; name: string; origin: { x: number; y: number; z: number } }
+  | { kind: 'farm'; crop: string; corner: { x: number; y: number; z: number }; size: number }
+  | { kind: 'sleep' };
 
 /** 身体在后台做的一件事 */
 interface Running {
@@ -50,6 +58,8 @@ interface Running {
   startedAt: number;
   /** 开始时的背包（算进度用） */
   inventory: Record<string, number>;
+  /** 做完要记进世界日志的（盖房子、种地、睡觉） */
+  meta?: JournalMeta;
 }
 
 const POLL_MS = 2000;
@@ -82,6 +92,8 @@ const ACTIONS: GameActionSpec[] = [
   { action: 'harvest', description: '收附近 16 格内熟了的庄稼，捡起来，再补种回去（后台做）；没熟的会告诉你长到第几阶段了', params: { name: '只收哪种：wheat、carrots、potatoes、beetroots（不填就都收）' } },
   { action: 'breed', description: '拿饲料喂附近的动物让它们生小的（后台做）：牛、羊吃 wheat，猪吃 carrot / potato / beetroot，鸡吃种子；喂过的动物 5 分钟后才能再生', params: { name: '动物的英文 id，比如 cow、sheep、pig、chicken', index: '喂几对（默认 1）' } },
   { action: 'shear', description: '用剪刀剪附近羊的羊毛（后台做）；剪过的羊吃了草才会长回来', params: { index: '剪几只（默认 3）' } },
+  { action: 'mark', description: '在这个世界的日志里记一个地点（家、矿洞、村庄……），下次来还能找到；同名的会换成新位置', params: { name: '地点的名字', text: '坐标「x y z」（不填就是你现在站的地方）；填「删掉」就把这个地点从日志里删了' } },
+  { action: 'journal', description: '看这个世界的整本日志（目标、地点、盖过的房子、种过的地、床、死过的地方、图纸）' },
   { action: 'chat', description: '在游戏的聊天栏里打字（游戏里的玩家才看得到；你回复里写的话是说出口的，不会进游戏聊天）', params: { text: '要发的话' } },
   { action: 'stop', description: '停下正在做的事' },
 ];
@@ -122,7 +134,7 @@ export class MinecraftSession implements GameSession {
   private wake: (() => void) | null = null;
   private running: Running | null = null;
   /** 排着队等身体做的长动作（她一次下了好几个，按顺序做） */
-  private queue: { bodyAction: string; args: Record<string, unknown>; label: string }[] = [];
+  private queue: { bodyAction: string; args: Record<string, unknown>; label: string; meta?: JournalMeta }[] = [];
   private goal = '';
   private players = new Set<string>();
   private spectators = new Set<string>();
@@ -138,6 +150,8 @@ export class MinecraftSession implements GameSession {
   private camera: CameraClient | null = null;
   /** 她画好的图纸：名字 → 图纸（这局里一直在） */
   private designs = new Map<string, Blueprint>();
+  private journal: WorldJournal | null = null;
+  private lastJournalSave = 0;
   /** 盖房子的虚影：动作的说法（「盖「小木屋」」）→ 虚影 */
   private ghosts = new Map<string, GhostBuild>();
   private ghostSeq = 0;
@@ -179,6 +193,7 @@ export class MinecraftSession implements GameSession {
       '【目标】长期想做的事用 goal 写下来，每个时刻都会提醒你，换多少轮都不会忘。',
       '【盖房子】房子是你自己设计的：用 design 交一张图纸（图例 + 从下往上一层层的字符图），会给你看正面、侧面、俯视三张投影、材料清单和图上的问题，你看着改；满意了用 build 在一个坐标盖起来，身体照图纸一块块放。template 有几张常见建筑的参考图纸，可以照着改。',
       '【种地】锄头锄过的泥土是耕地，种子种上去过几分钟（游戏时间）一阶一阶长大；耕地离水 4 格以内长得快。熟了用 harvest 收，种子会补种回去。动物用对的饲料喂一对就会生一只小的；栅栏、羊圈可以用 design 画了 build。',
+      '【日志】每个世界有一本日志：你的目标、存好的图纸、用 mark 记的地点，还有盖过的房子、种过的地、床、死在哪，下次来这个世界还在。',
       '【说话】你回复里写的话是说出口的（主人和观众听得到）；游戏里的玩家要用 chat 才看得到。',
       formatActionList(),
     ].join('\n');
@@ -215,7 +230,8 @@ export class MinecraftSession implements GameSession {
     this.lastHealth = this.snapshot?.body?.health ?? null;
     this.lastPhase = phaseOf(this.snapshot?.world?.timeOfDay);
     this.poller = setInterval(() => void this.poll().catch(() => {}), POLL_MS);
-    return this.describeNow(`进了服务器 ${this.options.host}:${this.options.port}（Minecraft ${this.status?.version ?? '版本不明'}，有哪些方块、物品和配方按这个版本来）`);
+    const world = await this.openJournal();
+    return [this.describeNow(`进了服务器 ${this.options.host}:${this.options.port}（Minecraft ${this.status?.version ?? '版本不明'}，有哪些方块、物品和配方按这个版本来）`), world].filter(Boolean).join('\n');
   }
 
   async wait(signal: AbortSignal, maxMs: number): Promise<Moment> {
@@ -239,7 +255,7 @@ export class MinecraftSession implements GameSession {
   refuse(action: GameAction): string | null {
     if (!ACTIONS.some((a) => a.action === action.action)) return `没有这个动作：${action.action}。\n${formatActionList()}`;
     if (!this.runtime || !this.status?.connected) return '还没进游戏（先 game_start）。';
-    if (['collect', 'craft', 'smelt', 'go_to_player', 'follow', 'attack', 'find', 'equip', 'drop', 'place', 'farm', 'breed'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
+    if (['collect', 'craft', 'smelt', 'go_to_player', 'follow', 'attack', 'find', 'equip', 'drop', 'place', 'farm', 'breed', 'mark'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
     if (['go', 'place', 'build', 'farm'].includes(action.action) && !parseXyz(action.text)) return `${action.action} 要在 text 里填坐标「x y z」。`;
     if (['template', 'design', 'build'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
     if (action.action === 'design' && !action.text?.trim()) return 'design 要在 text 里放图纸。';
@@ -263,6 +279,7 @@ export class MinecraftSession implements GameSession {
     switch (action.action) {
       case 'goal':
         this.goal = action.text!.trim();
+        this.journal?.setGoal(this.goal);
         this.note(`目标：${this.goal}`);
         return `记下了，目标：${this.goal}`;
       case 'template':
@@ -276,7 +293,10 @@ export class MinecraftSession implements GameSession {
         const names = Object.keys(materials(parsed.blueprint));
         const bad = await runtime.command<Record<string, string>>('check-blocks', { names }, 10_000).catch(() => ({}));
         const unknown = Object.values(bad);
-        if (!unknown.length) this.designs.set(title, parsed.blueprint);
+        if (!unknown.length) {
+          this.designs.set(title, parsed.blueprint);
+          this.journal?.saveDesign(title, text);
+        }
         const preview = describeBlueprint(title, parsed.blueprint, parsed.warnings, unknown);
         const have = this.snapshot?.body?.inventory ?? {};
         const short = Object.entries(materials(parsed.blueprint)).filter(([n, c]) => (have[n] ?? 0) < c).map(([n, c]) => `${n} 还差 ${c - (have[n] ?? 0)}`);
@@ -286,6 +306,17 @@ export class MinecraftSession implements GameSession {
           unknown.length ? '' : `存好了，可以 build ${title}。${short.length ? `照现在的背包，材料${short.join('，')}。` : '材料够了。'}`,
         ].filter(Boolean).join('\n');
       }
+      case 'mark': {
+        if (!this.journal) return '这局没有世界日志（DSH 主目录不可写）。';
+        const title = action.name!.trim();
+        if (/^(删掉|删除|delete|remove)$/i.test(action.text?.trim() ?? '')) return this.journal.mark(title, null);
+        const here = this.snapshot?.body?.position;
+        const p = xyz ?? (here ? { x: Math.floor(here.x), y: Math.floor(here.y), z: Math.floor(here.z) } : null);
+        if (!p) return '不知道你现在在哪，在 text 里填坐标「x y z」。';
+        return this.journal.mark(title, { ...p, dimension: this.dimension() });
+      }
+      case 'journal':
+        return this.journal ? this.journal.full() : '这局没有世界日志（DSH 主目录不可写）。';
       case 'chat':
         await runtime.command('say', { message: action.text!.trim() });
         this.note(`聊天栏：${action.text!.trim()}`);
@@ -338,6 +369,10 @@ export class MinecraftSession implements GameSession {
       this.ghosts.set(label, ghost);
       await ghost.show(ghostCells(this.designs.get(title)!, xyz!));
     }
+    const meta: JournalMeta | undefined = action.action === 'build' ? { kind: 'build', name: action.name!.trim(), origin: xyz! }
+      : action.action === 'farm' ? { kind: 'farm', crop: name, corner: xyz!, size: Math.max(1, Math.min(9, Math.round(action.index ?? 3))) }
+        : action.action === 'sleep' ? { kind: 'sleep' } : undefined;
+    if (action.action === 'build') this.journal?.usedDesign(action.name!.trim());
     const [bodyAction, args, label] = ((): [string, Record<string, unknown>, string] => {
       switch (action.action) {
         case 'collect': return ['collect_item', { item: name, quantity: count, radius: 64 }, `采集 ${name} ×${count}`];
@@ -365,19 +400,19 @@ export class MinecraftSession implements GameSession {
       }
     })();
     if (this.running) {
-      this.queue.push({ bodyAction, args, label });
+      this.queue.push({ bodyAction, args, label, meta });
       return `身体正在${this.running.label}，「${label}」排上了（前面还有 ${this.queue.length} 件，包括正在做的）。`;
     }
-    this.begin(bodyAction, args, label);
+    this.begin(bodyAction, args, label, meta);
     return `开始${label}。做完或卡住了会在下一个时刻告诉你。`;
   }
 
   /** 身体开始做一件长动作（做完自动接着做排队的下一件） */
-  private begin(bodyAction: string, args: Record<string, unknown>, label: string): void {
+  private begin(bodyAction: string, args: Record<string, unknown>, label: string, meta?: JournalMeta): void {
     const runtime = this.runtime;
     if (!runtime) return;
     const id = randomUUID();
-    const running: Running = { id, label, startedAt: Date.now(), inventory: { ...(this.snapshot?.body?.inventory ?? {}) } };
+    const running: Running = { id, label, startedAt: Date.now(), inventory: { ...(this.snapshot?.body?.inventory ?? {}) }, meta };
     this.running = running;
     this.options.onAction?.(label);
     this.options.record({ type: 'act', text: label });
@@ -403,6 +438,7 @@ export class MinecraftSession implements GameSession {
 
   async stop(): Promise<void> {
     this.finished = true;
+    this.saveLast();
     await this.clearGhosts();
     if (this.poller) clearInterval(this.poller);
     this.poller = null;
@@ -453,12 +489,13 @@ export class MinecraftSession implements GameSession {
     // 被新动作顶掉的：不用再报
     if (this.running !== running && result?.outcome === 'cancelled') return;
     if (this.running === running) this.running = null;
+    if (result && running.meta) this.recordDone(running.meta, result);
     const seconds = Math.round((Date.now() - running.startedAt) / 1000);
     const text = result ? describeResult(result, running.label) : `${running.label}：出错了（${error}）`;
     this.options.onAction?.(text);
     const next = !this.running && !this.disconnected ? this.queue.shift() : undefined;
     this.push(`${text}（用了 ${seconds} 秒）${next ? `；接着做排着的「${next.label}」` : ''}`, true);
-    if (next) this.begin(next.bodyAction, next.args, next.label);
+    if (next) this.begin(next.bodyAction, next.args, next.label, next.meta);
   }
 
   private onBodyEvent(event: MinecraftRuntimeEvent): void {
@@ -484,6 +521,7 @@ export class MinecraftSession implements GameSession {
       case 'death':
         // 正在做的事由身体自己报（死的时候它会停掉并回报），这里不清，免得两边对不上
         this.queue = [];
+        if (event.position) this.journal?.addDeath({ x: Math.floor(event.position.x), y: Math.floor(event.position.y), z: Math.floor(event.position.z), dimension: this.dimension() });
         this.push(`你死了${event.position ? `（在 ${fmtXyz(event.position)}）` : ''}。会在出生点复活，身上的东西掉在死的地方，几分钟内回去还能捡。`, true);
         setTimeout(() => void this.attachSpectators(), 3000);
         break;
@@ -531,6 +569,7 @@ export class MinecraftSession implements GameSession {
       if (phase === '白天') this.push('天亮了。', false);
     }
     if (phase) this.lastPhase = phase;
+    if (Date.now() - this.lastJournalSave > 60_000) this.saveLast();
     const dimension = String(s?.world?.dimension ?? '');
     const moved = this.lastDimension !== null && dimension !== this.lastDimension;
     this.lastDimension = dimension;
@@ -699,6 +738,61 @@ export class MinecraftSession implements GameSession {
   private note(text: string): void {
     this.options.record({ type: 'act', text });
     this.options.onAction?.(text);
+  }
+
+  // ───────────────────────── 世界日志 ─────────────────────────
+
+  /** 开局：打开这个世界的日志，接上目标和图纸；返回给她的「这个世界」那段 */
+  private async openJournal(): Promise<string> {
+    const dir = this.options.journalDir;
+    if (!dir || this.journal) return '';
+    const seed = this.options.rcon ? (await rcon(this.options.rcon, 'seed').catch(() => '')).match(/-?\d+/)?.[0] : undefined;
+    try {
+      const { journal, note } = WorldJournal.open(dir, `${this.options.host}:${this.options.port}`, this.options.username, seed);
+      this.journal = journal;
+      if (!this.goal && journal.goal) this.goal = journal.goal;
+      for (const d of journal.designs) {
+        const bp = parseBlueprint(d.text).blueprint;
+        if (bp && !this.designs.has(d.name)) this.designs.set(d.name, bp);
+      }
+      const intro = journal.intro();
+      journal.startSession();
+      return [note, intro].filter(Boolean).join('\n');
+    } catch (err) {
+      this.options.log?.(`[journal] could not open: ${(err as Error).message}`);
+      return '';
+    }
+  }
+
+  /** 身体做完一件要记的事 */
+  private recordDone(meta: JournalMeta, r: MinecraftActionResult): void {
+    const j = this.journal;
+    if (!j || r.outcome === 'cancelled') return;
+    const dimension = this.dimension();
+    if (meta.kind === 'build') {
+      const m = r.summary.match(/(\d+)\/(\d+) blocks/);
+      const done = m ? Number(m[1]) : r.outcome === 'succeeded' ? 1 : 0;
+      const total = m ? Number(m[2]) : 1;
+      if (done > 0) j.addBuilding(meta.name, { ...meta.origin, dimension }, done, total);
+    } else if (meta.kind === 'farm') {
+      if (r.outcome === 'succeeded' || r.outcome === 'partial') j.addField(meta.crop, { ...meta.corner, dimension }, meta.size);
+    } else if (meta.kind === 'sleep') {
+      const p = this.snapshot?.body?.position;
+      if (r.outcome === 'succeeded' && p) j.setBed({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), dimension });
+    }
+  }
+
+  /** 玩到哪了：结束时、玩的过程中每分钟一次 */
+  private saveLast(): void {
+    this.lastJournalSave = Date.now();
+    const p = this.snapshot?.body?.position;
+    if (!this.journal || !p) return;
+    const inv = formatInventory(this.snapshot?.body?.inventory);
+    this.journal.setLast({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), dimension: this.dimension() }, this.running?.label, inv.length > 200 ? `${inv.slice(0, 200)}……` : inv);
+  }
+
+  private dimension(): string {
+    return String(this.snapshot?.world?.dimension ?? 'overworld').replace('minecraft:', '');
   }
 
   private moment(reason: string): Moment {

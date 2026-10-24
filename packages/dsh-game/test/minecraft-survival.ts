@@ -15,7 +15,7 @@ import { MinecraftSession } from '../src/games/minecraft/session.js';
 import { rcon as rconRaw, type RconTarget } from '../src/games/minecraft/rcon.js';
 
 const ROOT = path.resolve(process.argv[2] ?? '.');
-/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量）、build（盖房子）、farm（种地、养动物）、不填 = 全部 */
+/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量）、build（盖房子）、farm（种地、养动物）、journal（世界日志）、不填 = 全部 */
 const SUITE = process.argv[3] ?? 'all';
 const props = Object.fromEntries(
   fs.readFileSync(path.join(ROOT, '.mc-server', 'server.properties'), 'utf8').split(/\r?\n/)
@@ -29,6 +29,8 @@ const rcon = (cmd: string) => rconRaw(RCON, cmd);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 身体的日志（排查用） */
 const LOG = path.join(ROOT, 'packages', 'dsh-game', 'test', '.out', 'body.log');
+/** 测试用的世界日志目录（每次跑之前清空） */
+const JOURNAL_DIR = path.join(ROOT, 'packages', 'dsh-game', 'test', '.out', 'journal');
 
 // ---------- 记录结果 ----------
 const results: { name: string; ok: boolean; notes: string[] }[] = [];
@@ -498,6 +500,84 @@ async function farmCases(): Promise<void> {
   await rcon(`kill @e[type=!player,x=${X},y=${Y},z=${Z},distance=..40]`);
 }
 
+/** 世界日志：她写的（目标、图纸、地点）、身体自动记的（盖的、种的、床、死），下一局开局接上；换了世界、主人清空 */
+async function journalCases(): Promise<void> {
+  const { WorldJournal, journalFile } = await import('../src/games/minecraft/journal.js');
+  const server = `127.0.0.1:${Number(props['server-port'] || 25565)}`;
+  await rcon(`fill ${X - 9} ${Y + 1} ${Z - 9} ${X + 9} ${Y + 6} ${Z + 9} air`);
+  await rcon(`fill ${X - 9} ${Y} ${Z - 9} ${X + 9} ${Y} ${Z + 9} dirt`);
+  await rcon(`kill @e[type=!player,x=${X},y=${Y},z=${Z},distance=..40]`);
+  await reset();
+  await rcon(`tp ${NAME} ${X} ${Y + 1} ${Z}`);
+  await sleep(1500);
+
+  begin('日志：第一次来这个世界');
+  check(/第一次来这个世界/.test(firstStart), `开局说了第一次来（${firstStart.split('\n').slice(-1)[0].slice(0, 80)}）`);
+
+  begin('日志：她写的（目标、地点、图纸）');
+  note(await session.act({ action: 'goal', text: '在空岛上盖一个家' }));
+  const home = await session.act({ action: 'mark', name: '家' });
+  note(home);
+  check(/记下了：「家」在 \(1000, 201, 1000\)/.test(home), 'mark 不填坐标：记她站的地方');
+  note(await session.act({ action: 'mark', name: '矿洞', text: `${X - 5} ${Y - 3} ${Z + 4}` }));
+  note(await session.act({ action: 'mark', name: '临时', text: `${X} ${Y} ${Z}` }));
+  const removed = await session.act({ action: 'mark', name: '临时', text: '删掉' });
+  check(/删掉了/.test(removed), `mark 填「删掉」：删了（${removed}）`);
+  const pillar = '图例：\n# cobblestone\n第1层：\n##\n第2层：\n##';
+  check(/存好了/.test(await session.act({ action: 'design', name: '小石台', text: pillar })), '图纸存好了');
+
+  begin('日志：身体自动记的（盖的、种的、床、死）');
+  await rcon(`give ${NAME} cobblestone 8`);
+  await rcon(`give ${NAME} wooden_hoe 1`);
+  await rcon(`give ${NAME} wheat_seeds 4`);
+  await rcon(`give ${NAME} white_bed 1`);
+  await sleep(1000);
+  await step('build', { name: '小石台', text: `${X + 3} ${Y + 1} ${Z - 3}` }, { ok: /：做完了/ });
+  await step('farm', { name: 'wheat_seeds', text: `${X - 4} ${Y} ${Z - 4}`, index: 2 }, { ok: /：做完了/ });
+  await rcon('time set 13000');
+  await sleep(1000);
+  await step('sleep', {}, { ok: /做完了/ });
+  await rcon('time set day');
+  await rcon(`tp ${NAME} ${X + 2} ${Y + 1} ${Z + 2}`);
+  await sleep(1500);
+  await rcon(`kill ${NAME}`);
+  await sleep(4000);
+  await rcon(`tp ${NAME} ${X} ${Y + 1} ${Z}`);
+  await sleep(1500);
+  const whole = await session.act({ action: 'journal' });
+  note(whole.replace(/\n/g, ' | ').slice(0, 600));
+  check(/目标：在空岛上盖一个家/.test(whole), '目标记下了');
+  check(/家 \(1000, 201, 1000\)/.test(whole) && /矿洞 \(995, 197, 1004\)/.test(whole) && !/临时/.test(whole), '地点：家、矿洞在，删掉的不在');
+  check(/「小石台」在 \(1003, 201, 997\)，盖完了/.test(whole), '盖过的建筑：名字、坐标、盖完了');
+  check(/wheat_seeds 2×2 在 \(996, 200, 996\)/.test(whole), '种过的地');
+  check(/床（复活点）：/.test(whole), '床记下了');
+  check(/死过 1 次，最近一次在 \(1002, 201, 1002\)/.test(whole), '死在哪记下了');
+  check(/存着的图纸：小石台/.test(whole), '图纸在日志里');
+
+  begin('日志：下一局开局接上');
+  await session.stop();
+  session = newSession();
+  const again = await session.start();
+  note(again.replace(/\n/g, ' | ').slice(0, 700));
+  check(/你在这里玩过 1 次，上次是/.test(again), '说了玩过几次、上次什么时候');
+  check(/目标：在空岛上盖一个家/.test(again) && /家 \(1000, 201, 1000\)/.test(again) && /「小石台」/.test(again), '目标、地点、建筑都在');
+  check(/你的目标：在空岛上盖一个家/.test((await session.wait(AbortSignal.timeout(3000), 2000)).notes.join(' ')), '目标接上了（每个时刻都提醒）');
+  const rebuild = session.refuse({ action: 'build', name: '小石台', text: `${X - 6} ${Y + 1} ${Z + 3}` });
+  check(rebuild === null, `上一局的图纸能直接 build（${rebuild ?? '可以'}）`);
+
+  begin('日志：服务器换了新世界、主人清空');
+  const file = journalFile(JOURNAL_DIR, server, NAME);
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const realSeed = data.seed;
+  check(!!realSeed, `记下了世界种子（${realSeed}）`);
+  const swapped = WorldJournal.open(JOURNAL_DIR, server, NAME, '12345');
+  check(/换了一个新世界/.test(swapped.note ?? '') && /第一次来/.test(swapped.journal.intro()), '种子对不上：旧的收起来，开新的一本');
+  check(fs.readdirSync(JOURNAL_DIR).some((f) => f.includes('.old-world-')), '旧日志改名留着');
+  fs.writeFileSync(file, JSON.stringify(data));
+  check(WorldJournal.clear(JOURNAL_DIR, server, NAME) && WorldJournal.read(JOURNAL_DIR, server, NAME) === null, '清空以后设置面板读到的是「还没玩过」');
+  check(fs.readdirSync(JOURNAL_DIR).some((f) => f.includes('.cleared-')), '清空的改名留着');
+}
+
 async function reset(): Promise<void> {
   await rcon(`clear ${NAME}`);
   await rcon(`effect clear ${NAME}`);
@@ -505,18 +585,26 @@ async function reset(): Promise<void> {
   await rcon(`kill @e[type=item,x=${X},y=${Y},z=${Z},distance=..30]`);
 }
 
+function newSession(): MinecraftSession {
+  return new MinecraftSession({
+    workerPath: path.join(ROOT, 'packages', 'dsh-game', 'lib', 'minecraft-worker.cjs'),
+    host: '127.0.0.1', port: Number(props['server-port'] || 25565), username: NAME,
+    record: () => {}, camera: null, rcon: RCON, journalDir: JOURNAL_DIR,
+    log: (text) => fs.appendFileSync(LOG, `${new Date().toISOString()} ${text}\n`),
+  });
+}
+/** 第一次开局时她看到的（日志测试看「第一次来这个世界」） */
+let firstStart = '';
+
 async function main(): Promise<void> {
   const mobSpawning = (await rcon('gamerule doMobSpawning')).match(/(true|false)/)?.[1] ?? 'true';
   await rcon('gamerule doMobSpawning false');
   await rcon('time set day');
-  session = new MinecraftSession({
-    workerPath: path.join(ROOT, 'packages', 'dsh-game', 'lib', 'minecraft-worker.cjs'),
-    host: '127.0.0.1', port: Number(props['server-port'] || 25565), username: NAME,
-    record: () => {}, camera: null, rcon: RCON,
-    log: (text) => fs.appendFileSync(LOG, `${new Date().toISOString()} ${text}\n`),
-  });
+  fs.rmSync(JOURNAL_DIR, { recursive: true, force: true });
+  session = newSession();
   try {
-    note(await session.start().then((s) => s.split('\n')[0]));
+    firstStart = await session.start();
+    note(firstStart.split('\n')[0]);
     await buildArena();
     await rcon(`kill @e[type=!player,x=${X},y=${Y},z=${Z},distance=..40]`);
     await reset();
@@ -525,6 +613,7 @@ async function main(): Promise<void> {
     if (SUITE === 'all' || SUITE === 'edge') await edgeCases();
     if (SUITE === 'all' || SUITE === 'build') await buildCases();
     if (SUITE === 'all' || SUITE === 'farm') await farmCases();
+    if (SUITE === 'all' || SUITE === 'journal') await journalCases();
   } finally {
     await session.stop().catch(() => {});
     await rcon(`forceload remove ${X - 16} ${Z - 16} ${X + 16} ${Z + 16}`);

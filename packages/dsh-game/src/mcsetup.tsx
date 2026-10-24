@@ -4,6 +4,7 @@
  *   - 文字框离开时保存，开关点了就保存；存完宿主重新检查一遍（/api/dsh-game/mc-setup）
  *   - 每一项检查一行 ✓ / ✗：服务器连没连上（什么版本、几个人在线）、名字、客户端、Java、RCON、HUD 网页
  *   - 有问题时「让大肥鱼玩」按钮不能点，并写出原因
+ *   - 下面是这个服务器上她那本世界日志（/api/dsh-game/mc-journal）：看，或者清空（换存档、重开时）
  * 设置和检查都在宿主（games/minecraft/setup.ts），这里只显示和改。
  */
 
@@ -68,6 +69,39 @@ function Field({ label, value, type = 'text', placeholder, hint, disabled, onSav
       />
       {hint && <small>{hint}</small>}
     </label>
+  );
+}
+
+/** 这个服务器上她的世界日志：只读，能清空（旧的改名留着） */
+function JournalBox({ server, username }: { server: string; username: string }) {
+  const [text, setText] = useState<string | null | undefined>(undefined);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(async (method: 'GET' | 'DELETE' = 'GET') => {
+    setError(null);
+    try {
+      const res = await fetch('/api/dsh-game/mc-journal', { method, cache: 'no-store' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      setText(data.text ?? null);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }, []);
+  useEffect(() => { void load(); }, [load, server, username]);
+  const clear = () => {
+    if (window.confirm(`清空 ${username} 在 ${server} 的世界日志？她会像第一次来这个世界一样（旧的日志文件改名留着）。`)) void load('DELETE');
+  };
+  return (
+    <div className="dg-mc-journal">
+      <h3>
+        这个世界的日志
+        {text && <button type="button" className="dg-mc-btn dg-mc-btn-quiet" onClick={clear}>清空</button>}
+      </h3>
+      {text === undefined ? <p className="dg-mc-note">读取中……</p>
+        : text === null ? <p className="dg-mc-note">{username} 还没在 {server} 玩过。她写下的目标、存好的图纸、记的地点，盖过的房子、种过的地、床、死在哪，都会记在这里，下次开局接着用。</p>
+          : <pre>{text}</pre>}
+      {error && <div className="dg-mc-problem">! {error}</div>}
+    </div>
   );
 }
 
@@ -174,6 +208,7 @@ export function McSetupPanel({ onCheck }: { onCheck: (check: McSetupCheck | null
         })}
       </ul>
       {error && <div className="dg-mc-problem">! {error}</div>}
+      <JournalBox server={`${setup.host}:${setup.port}`} username={setup.username} />
     </section>
   );
 }
@@ -218,5 +253,10 @@ export const MC_SETUP_CSS = `
 .dg-mc-checks b{font-weight:600;color:#eaffe2}
 .dg-mc-checks span{min-width:0;font:11px/1.5 var(--dg-mono);color:rgba(222,240,226,.7);overflow-wrap:anywhere}
 .dg-mc-checks li[data-bad] i,.dg-mc-checks li[data-bad] span{color:#ffb3c0}
+.dg-mc-journal{margin-top:16px;padding-top:12px;border-top:1px solid rgba(123,211,107,.18);display:flex;flex-direction:column;gap:8px}
+.dg-mc-journal h3{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0;font-size:13px;letter-spacing:1px;color:var(--grass)}
+.dg-mc-journal pre{margin:0;max-height:220px;overflow:auto;padding:10px 12px;border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere;
+  font:11px/1.7 var(--dg-mono);color:rgba(234,255,226,.85);background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.08)}
+.dg-mc-btn-quiet{padding:4px 10px;font-size:11px;letter-spacing:0;background:transparent;color:rgba(222,240,226,.75)}
 .dg-mc-problem{margin-top:12px;padding:9px 12px;border-radius:10px;font-size:12px;color:#ffd1d9;background:rgba(80,10,24,.5);border:1px solid rgba(255,120,140,.45)}
 `;
