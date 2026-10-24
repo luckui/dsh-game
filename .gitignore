@@ -16,3 +16,6 @@ tools/obs.mjs
 tools/werewolf-art.mjs
 tools/export-run.mjs
 tools/analyze-session.mjs
+
+# local Minecraft server (world, jar, rcon password)
+.mc-server/

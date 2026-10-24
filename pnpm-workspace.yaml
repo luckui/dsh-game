@@ -5,3 +5,8 @@ allowBuilds:
 # pnpm 10 的写法（pnpm 12 用上面的 allowBuilds）
 onlyBuiltDependencies:
   - esbuild
+patchedDependencies:
+  # 寻路、采集、工具的修补（来自 hiyoriai，修门/梯子/卡死/选工具等细节）
+  mineflayer-pathfinder@2.4.5: patches/mineflayer-pathfinder@2.4.5.patch
+  mineflayer-collectblock@1.6.0: patches/mineflayer-collectblock@1.6.0.patch
+  mineflayer-tool@1.2.0: patches/mineflayer-tool@1.2.0.patch

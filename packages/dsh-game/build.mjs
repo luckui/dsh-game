@@ -23,6 +23,19 @@ if (!clientOnly) await build({
   sourcemap: true,
 });
 
+// Minecraft 身体子进程：mineflayer 带着全部版本的游戏数据，体积大，不打进包里，运行时从 node_modules 加载
+if (!clientOnly) await build({
+  entryPoints: { 'minecraft-worker': 'src/games/minecraft/body/workerEntry.ts' },
+  outdir: 'lib',
+  outExtension: { '.js': '.cjs' },
+  bundle: true,
+  packages: 'external',
+  platform: 'node',
+  format: 'cjs',
+  target: 'node22',
+  sourcemap: true,
+});
+
 await build({
   entryPoints: ['src/client.tsx'],
   outfile: 'lib/client.js',
