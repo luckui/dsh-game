@@ -10,6 +10,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 
 export interface CameraOptions {
   /** 装好游戏的 .minecraft（里面有 versions/<版本>/） */
@@ -74,12 +75,47 @@ export function findJava(configured: string, root: string): string {
   return 'javaw';
 }
 
-function writeOptions(gameDir: string): void {
+/**
+ * 写摄像机的设置。options.txt 要带上这个游戏版本的数据版本号（version:）：没有的话游戏当它是很老版本的设置文件，
+ * 先拿去转换，我们写的设置（比如失焦不暂停）可能就不作数了。数据版本号从游戏 jar 里的 version.json 读
+ */
+function writeOptions(gameDir: string, root: string, version: string): void {
   fs.mkdirSync(gameDir, { recursive: true });
   const file = path.join(gameDir, 'options.txt');
   const lines = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean) : [];
-  const keep = lines.filter((l) => !(l.split(':')[0] in CAMERA_OPTIONS));
-  fs.writeFileSync(file, [...keep, ...Object.entries(CAMERA_OPTIONS).map(([k, v]) => `${k}:${v}`)].join('\n') + '\n');
+  const dataVersion = readDataVersion(path.join(root, 'versions', version, `${version}.jar`));
+  const ours: Record<string, string> = { ...(dataVersion ? { version: String(dataVersion) } : {}), ...CAMERA_OPTIONS };
+  const keep = lines.filter((l) => !(l.split(':')[0] in ours));
+  fs.writeFileSync(file, [...Object.entries(ours).map(([k, v]) => `${k}:${v}`), ...keep].join('\n') + '\n');
+}
+
+/** 游戏 jar（zip）里 version.json 的 world_version：从中央目录找到它，只解压这一个文件 */
+function readDataVersion(jar: string): number | null {
+  try {
+    const buf = fs.readFileSync(jar);
+    const eocd = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+    if (eocd < 0) return null;
+    const count = buf.readUInt16LE(eocd + 10);
+    let p = buf.readUInt32LE(eocd + 16);
+    for (let i = 0; i < count; i++) {
+      const method = buf.readUInt16LE(p + 10);
+      const size = buf.readUInt32LE(p + 20);
+      const nameLen = buf.readUInt16LE(p + 28);
+      const extraLen = buf.readUInt16LE(p + 30);
+      const commentLen = buf.readUInt16LE(p + 32);
+      const local = buf.readUInt32LE(p + 42);
+      if (buf.toString('utf8', p + 46, p + 46 + nameLen) === 'version.json') {
+        const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
+        const raw = buf.subarray(start, start + size);
+        const text = method === 8 ? zlib.inflateRawSync(raw).toString('utf8') : raw.toString('utf8');
+        return Number(JSON.parse(text).world_version) || null;
+      }
+      p += 46 + nameLen + extraLen + commentLen;
+    }
+  } catch {
+    // 读不到就不写版本号
+  }
+  return null;
 }
 
 export class CameraClient {
@@ -95,7 +131,7 @@ export class CameraClient {
   async start(): Promise<void> {
     if (this.pid) return;
     const o = this.options;
-    writeOptions(o.gameDir);
+    writeOptions(o.gameDir, o.root, o.version);
     // 库是 CommonJS：按需加载（插件不玩 Minecraft 时不用它）
     const mod = (await import('minecraft-launcher-core')) as any;
     const { Client, Authenticator } = mod.default ?? mod;
@@ -111,7 +147,8 @@ export class CameraClient {
       authorization: await Authenticator.getAuth(o.username),
       memory: { max: '2G', min: '1G' },
       javaPath: o.java,
-      overrides: { gameDirectory: o.gameDir, detached: false },
+      // 工作目录也放摄像机自己的目录：游戏的日志写在工作目录下，别写进主人的 .minecraft
+      overrides: { gameDirectory: o.gameDir, cwd: o.gameDir, detached: false },
       window: { width: 1280, height: 720 },
       quickPlay: { type: 'multiplayer', identifier: `${o.host}:${o.port}` },
     } as never);
@@ -163,6 +200,34 @@ for ($i = 0; $i -lt 40; $i++) {
     const encoded = Buffer.from(script, 'utf16le').toString('base64');
     const ps = spawn('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], { windowsHide: true, stdio: 'ignore' });
     ps.on('exit', (code) => this.options.log?.(`[camera] window set to no-activate (${code === 0 ? 'ok' : `exit ${code}`})`));
+  }
+
+  /** 往摄像机窗口发按键（PostMessage，窗口不用激活）：vk 是虚拟键码，scan 是扫描码（GLFW 靠它认键），按 times 次 */
+  pressKey(vk: number, scan: number, times = 1): Promise<boolean> {
+    const pid = this.pid;
+    if (!pid || process.platform !== 'win32' || times <= 0) return Promise.resolve(false);
+    const down = 1 + scan * 65536;
+    const up = down + 0xC0000000;
+    const script = `
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class CamKey { [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l); }
+"@
+$h = (Get-Process -Id ${pid} -ErrorAction SilentlyContinue).MainWindowHandle
+if (-not $h) { exit 1 }
+for ($i = 0; $i -lt ${times}; $i++) {
+  [CamKey]::PostMessage($h, 0x100, [IntPtr]${vk}, [IntPtr]${down}) | Out-Null
+  Start-Sleep -Milliseconds 60
+  [CamKey]::PostMessage($h, 0x101, [IntPtr]${vk}, [IntPtr]([int64]${up})) | Out-Null
+  Start-Sleep -Milliseconds 150
+}
+`;
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    return new Promise((resolve) => {
+      const ps = spawn('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], { windowsHide: true, stdio: 'ignore' });
+      ps.on('exit', (code) => resolve(code === 0));
+      ps.on('error', () => resolve(false));
+    });
   }
 
   stop(): void {

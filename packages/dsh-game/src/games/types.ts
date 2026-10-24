@@ -73,6 +73,10 @@ export interface GameSession {
   readonly title: string;
   /** 游戏画面的网页地址（Minecraft 的网页 3D 画面）：有的话「游戏」标签页直接嵌进来 */
   readonly viewUrl?: string | null;
+  /** 游戏客户端的视角（Minecraft 摄像机：first 她的视角 / back 背后 / front 正面） */
+  readonly perspective?: string;
+  /** 切换游戏客户端的视角；返回 'ok' 或者做不到的原因 */
+  setClientView?(mode: string): Promise<string>;
   /** 画面不在插件里时给主人看的说明（Minecraft：画面在摄像机客户端窗口里） */
   readonly screenNote?: string;
   /** 实时游戏（Minecraft）：世界不会停下来等她，她说话的同时身体就开始动 */

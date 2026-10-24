@@ -127,6 +127,8 @@ export class MinecraftSession implements GameSession {
   private lastRespectate = 0;
   private lastHud = '';
   private camera: CameraClient | null = null;
+  /** 摄像机的人称（F5 三档循环：她的视角 → 背后 → 正面）；新开的客户端是她的视角 */
+  perspective: 'first' | 'back' | 'front' = 'first';
   private cameraSeen = false;
   private lastCameraCheck = 0;
   /** 给主人看的摄像机状态（「游戏」标签页显示） */
@@ -476,6 +478,7 @@ export class MinecraftSession implements GameSession {
       this.cameraNote = `没开摄像机客户端：没找到装好的 Minecraft ${version}（在插件设置里填 .minecraft 目录，用 HMCL 或官方启动器装好这个版本）。`;
       return;
     }
+    this.perspective = 'first';
     this.camera = new CameraClient({
       root, version, username: cam.name, host: this.options.host, port: this.options.port,
       gameDir: cam.gameDir, java: findJava(cam.java, root), log: this.options.log,
@@ -488,6 +491,19 @@ export class MinecraftSession implements GameSession {
       this.camera = null;
       this.cameraNote = `摄像机客户端没开起来：${(err as Error).message}`;
     }
+  }
+
+  /** 切换摄像机的人称：按需要的次数发 F5 */
+  async setClientView(mode: string): Promise<string> {
+    const order = ['first', 'back', 'front'] as const;
+    const want = order.indexOf(mode as (typeof order)[number]);
+    if (want < 0) return `没有这个视角：${mode}`;
+    if (!this.camera?.running) return '摄像机客户端没开。';
+    const presses = (want - order.indexOf(this.perspective) + 3) % 3;
+    if (presses && !(await this.camera.pressKey(0x74, 0x3f, presses))) return '没能给摄像机窗口发按键。';
+    this.perspective = order[want];
+    this.options.onStateChange?.();
+    return 'ok';
   }
 
   /** 摄像机进服了：切成旁观；挂到她身上由 keepCameraAttached 负责（刚进服还在加载地形时挂不上） */
@@ -507,7 +523,7 @@ export class MinecraftSession implements GameSession {
     this.lastCameraCheck = Date.now();
     const reply = await rcon(target, `data get entity ${this.cameraName} Pos`).catch(() => '');
     const nums = reply.match(/-?\d+(\.\d+)?(?=d)/g)?.map(Number);
-    const attached = nums && nums.length >= 3 && Math.hypot(nums[0] - me.x, nums[1] - me.y, nums[2] - me.z) < 0.3;
+    const attached = nums && nums.length >= 3 && Math.hypot(nums[0] - me.x, nums[1] - me.y, nums[2] - me.z) < 2;
     if (!attached) await rcon(target, `spectate ${this.options.username} ${this.cameraName}`).catch(() => {});
   }
 

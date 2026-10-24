@@ -289,6 +289,31 @@ function WebScreen({ base, title }: { base: string; title: string }) {
   );
 }
 
+/** 画面在游戏客户端窗口里（Minecraft 摄像机）：说明 + 视角切换（往那个窗口发 F5，不用碰它） */
+function ClientScreen({ title, note, perspective }: { title: string; note: string; perspective: string | null }) {
+  const [error, setError] = useState('');
+  const pick = async (mode: string) => {
+    setError('');
+    const res = await fetch(`/api/dsh-game/view?mode=${mode}`, { method: 'POST' }).catch(() => null);
+    if (!res?.ok) setError((await res?.text().catch(() => '')) || '切换失败');
+  };
+  const views: [string, string][] = [['first', '她的视角'], ['back', '背后'], ['front', '正面']];
+  return (
+    <div className="dg-screen dg-screen-note">
+      <b>{`${title}的画面在游戏客户端窗口里`}</b>
+      <p>{note}</p>
+      {perspective && (
+        <div className="dg-client-views">
+          {views.map(([mode, label]) => (
+            <button key={mode} className={`dg-stop dg-tool${perspective === mode ? ' on' : ''}`} onClick={() => void pick(mode)}>{label}</button>
+          ))}
+        </div>
+      )}
+      {error && <p className="dg-client-error">{error}</p>}
+    </div>
+  );
+}
+
 /** 这个标签开着时收起 DSH 默认的输入框卡片（审批 / 提问面板换掉输入框时，默认卡片本来就藏着，不受影响） */
 function useHideComposer(): void {
   useEffect(() => {
@@ -364,8 +389,8 @@ export function GameView({ sessionId, events, send, stop, openSession }: GameTab
   } else if (state?.view) {
     screenBody = <WebScreen base={state.view} title={state.title ?? '游戏'} />;
   } else if (state?.note) {
-    // 画面不在插件里（Minecraft：在摄像机客户端窗口里）
-    screenBody = <ScreenNote title={`${state.title ?? '游戏'}的画面在游戏客户端窗口里`} text={state.note} />;
+    // 画面不在插件里（Minecraft：在摄像机客户端窗口里），给视角切换按钮
+    screenBody = <ClientScreen title={state.title ?? '游戏'} note={state.note} perspective={state.perspective ?? null} />;
   } else {
     screenBody = <GameScreen onLive={setLive} />;
   }
@@ -437,6 +462,9 @@ html[data-dsh-game-view][data-dsh-game-theater] header:has([data-conversation-ta
 .dg-layout[data-theater] .wt-hud-left,.dg-screen-slot:fullscreen .wt-hud-left{margin-top:40px}
 .dg-hover-bar .dg-live{font-size:10px}
 .dg-screen-slot > .dg-screen{flex:1}
+.dg-client-views{display:flex;gap:6px;margin-top:10px}
+.dg-client-views .on{background:rgba(120,150,255,.85);color:#fff;border-color:transparent}
+.dg-client-error{color:#ff9aa8}
 .dg-screen-web{padding:0;overflow:hidden;position:relative}
 .dg-web-views{position:absolute;right:10px;top:10px;display:flex;gap:4px;opacity:.55;transition:opacity .15s}
 .dg-screen-web:hover .dg-web-views{opacity:1}

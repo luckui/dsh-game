@@ -404,6 +404,8 @@ export interface GameState {
   view?: string | null;
   /** 画面不在插件里时给主人看的说明 */
   note?: string | null;
+  /** 游戏客户端现在的视角（有的话「游戏」标签页给切换按钮） */
+  perspective?: string | null;
 }
 
 let current: GameSession | null = null;
@@ -427,7 +429,7 @@ export const games = {
   },
   state(): GameState {
     if (!current) return { status: 'none', game: lastClosed?.game ?? null, title: lastClosed?.title ?? null, owner: null, closed: lastClosed };
-    return { status: current.finished ? 'finished' : paused ? 'paused' : 'running', game: current.id, title: current.title, owner: currentOwner, closed: null, view: current.viewUrl ?? null, note: current.screenNote || null };
+    return { status: current.finished ? 'finished' : paused ? 'paused' : 'running', game: current.id, title: current.title, owner: currentOwner, closed: null, view: current.viewUrl ?? null, note: current.screenNote || null, perspective: current.perspective ?? null };
   },
   /** 上一局是怎么关掉的 */
   get closed(): GameState['closed'] {
