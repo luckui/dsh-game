@@ -2739,6 +2739,8 @@ export function createMineflayerAdapter(
       const before = inventoryCounts(current);
       const processedTargets = new Set<string>();
       const observations: MinecraftActionResult['observations'] = [];
+      /** 每只死在哪（追下一只可能跑远了，最后回去捡） */
+      const killedAt: Vec3[] = [];
       let confirmed = 0;
       let attacked = 0;
       const report = (level: 'info' | 'warn' | 'error', message: string) => emit({
@@ -2777,6 +2779,7 @@ export function createMineflayerAdapter(
           await current.pvp.stop?.();
           if (killed) {
             confirmed += 1;
+            if (entity.position) killedAt.push(entity.position.clone());
             report('info', `confirmed ${options.entity}#${entity.id ?? 'unknown'} dead (${confirmed}/${options.quantity})`);
             continue;
           }
@@ -2801,7 +2804,13 @@ export function createMineflayerAdapter(
       report('info', `collecting drops after ${confirmed} confirmed kills`);
       // 生物死了要播完倒下的动画（约 1 秒）才掉东西：等它掉出来再去捡，不然最后一只的掉落物会被落下
       if (confirmed > 0) await delay(1200, options.signal);
-      const pickedDrops = await (dependencies.collectDrops ?? collectNearbyDrops)(current, 16, options.signal);
+      let pickedDrops = await (dependencies.collectDrops ?? collectNearbyDrops)(current, 16, options.signal);
+      // 离得远的死亡地点（追后面那只跑远了）：走回去再捡一次
+      for (const spot of killedAt) {
+        if (current.entity.position.distanceTo(spot) <= 8) continue;
+        const r = await patchedGoto(current, new goals.GoalNear(spot.x, spot.y, spot.z, 2), { signal: options.signal });
+        if (r.ok) pickedDrops += await (dependencies.collectDrops ?? collectNearbyDrops)(current, 8, options.signal);
+      }
       const inventoryDelta = inventoryDifference(before, inventoryCounts(current));
       const complete = options.kill ? confirmed >= options.quantity : attacked > 0;
       return {
