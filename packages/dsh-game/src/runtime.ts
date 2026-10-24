@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { libraryInfo as ddlcLibraryInfo } from './games/ddlc/profile.js';
 import { DdlcSession } from './games/ddlc/session.js';
+import { MinecraftSession } from './games/minecraft/session.js';
 import { NARRATOR_RATE, NARRATOR_VOICE } from './games/werewolf/characters.js';
 import type { WolfEntry, WolfState } from './games/werewolf/engine.js';
 import { WerewolfSession } from './games/werewolf/session.js';
@@ -46,8 +47,12 @@ export interface Settings {
   wolfModel: string;
   /** 旧版：狼人杀的座位配置「角色=驱动方式」。同上 */
   wolfSeats: string;
+  /** Minecraft 服务器（Java 版）：地址、端口、她在游戏里的名字 */
+  mcHost: string;
+  mcPort: number;
+  mcUsername: string;
 }
-const DEFAULT_SETTINGS: Settings = { voice: DEFAULT_VOICE, censor: true, director: true, summaryModel: 'deepseek-official/deepseek-flash', ddlcDir: '', wolfModel: 'deepseek-official/deepseek-flash', wolfSeats: '' };
+const DEFAULT_SETTINGS: Settings = { voice: DEFAULT_VOICE, censor: true, director: true, summaryModel: 'deepseek-official/deepseek-flash', ddlcDir: '', wolfModel: 'deepseek-official/deepseek-flash', wolfSeats: '', mcHost: '127.0.0.1', mcPort: 25565, mcUsername: 'DaFeiYu' };
 
 /** 插件配置的读取方式：根插件 apply 时接上配置（插件页改了立刻生效，每次用时现读） */
 let readSettings: () => Partial<Settings> = () => ({});
@@ -209,6 +214,17 @@ export function assetsDir(): string {
   throw new Error('dsh-game: 找不到 games/ 素材目录');
 }
 
+/** Minecraft 身体子进程（构建产物 lib/minecraft-worker.cjs，和 lib/index.js 同级；打包分块时本文件可能在 lib/chunks/ 里） */
+export function minecraftWorkerPath(): string {
+  let dir = path.dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 3; i++) {
+    const candidate = path.join(dir, 'minecraft-worker.cjs');
+    if (fs.existsSync(candidate)) return candidate;
+    dir = path.dirname(dir);
+  }
+  throw new Error('dsh-game: 找不到 lib/minecraft-worker.cjs（要先构建）');
+}
+
 /** 大肥鱼状态片段目录：插件包里的 assets/dafeiyu/（和 games/ 同级）；DSH_GAME_CLIPS 可以换成别的角色包 */
 export function clipsDir(): string {
   return process.env.DSH_GAME_CLIPS ?? path.join(path.dirname(assetsDir()), 'assets', 'dafeiyu');
@@ -322,6 +338,27 @@ export const GAMES = {
         if (entry.kind === 'end') setTimeout(announceGameState, 0);
         broadcast({ type: 'wolf', entry, state, at: Date.now() });
       },
+    }),
+  },
+  minecraft: {
+    title: 'Minecraft',
+    library: (): LibraryEntry => ({
+      id: 'minecraft',
+      name: 'Minecraft',
+      subtitle: 'Java 版 · 生存',
+      tags: ['沙盒', '生存', '服务器'],
+      blurb: `大肥鱼以 ${settings.mcUsername} 的身份进一个 Minecraft 服务器自己玩：砍树、合成、挖矿、打怪，跟她说想看什么她就去做。需要 Java 版服务器（默认 ${settings.mcHost}:${settings.mcPort}）。`,
+      installed: true,
+      getUrl: 'https://www.minecraft.net/',
+      savedAt: null,
+    }),
+    create: () => new MinecraftSession({
+      workerPath: minecraftWorkerPath(),
+      host: settings.mcHost,
+      port: Number(settings.mcPort) || 25565,
+      username: settings.mcUsername,
+      record,
+      onAction: (text) => broadcast({ type: 'act', text, at: Date.now() }),
     }),
   },
 } as const;

@@ -140,6 +140,8 @@ export class MinecraftRuntimeManager {
   }
 
   private logRuntimeEvent(event: MinecraftRuntimeEvent): void {
+    // 例行的快照日志（游戏层每 2 秒拍一次）不打印
+    if (event.kind === 'log' && event.level === 'info' && /^(snapshot |\[snapshot-state\])/.test(event.message)) return;
     if (event.kind === 'log') {
       const text = `[Minecraft Runtime Event] ${event.message}`;
       if (event.level === 'info') console.log(text);

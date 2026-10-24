@@ -141,6 +141,7 @@ export function createRuntimeWorkerController(
   emit: (event: MinecraftRuntimeEvent) => void,
 ): WorkerController {
   let foodShortageActive = false;
+  let companion = true;
   let ownerPlayer: string | undefined;
   let followEnabled = true;
   let currentAction: MinecraftEnvironmentSnapshot['action'];
@@ -170,6 +171,10 @@ export function createRuntimeWorkerController(
   );
 
   const resumeFollowing = async (): Promise<void> => {
+    if (!companion) {
+      currentAction = undefined;
+      return;
+    }
     if (taskActive) {
       currentAction = undefined;
       emit({ kind: 'log', level: 'info', message: '[follow-state] task owns body; follow suspended' });
@@ -292,6 +297,7 @@ export function createRuntimeWorkerController(
       });
     },
     async onPlayersChanged(players) {
+      if (!companion) return;
       const status = adapter.status();
       const humanPlayers = players.filter((player) => !samePlayer(player, status.username));
       if (!ownerPlayer && humanPlayers.length === 1) {
@@ -330,7 +336,7 @@ export function createRuntimeWorkerController(
       await runtime.cancel(actionId, {
         code: 'died',
         recoverable: false,
-        summary: 'Minecraft task stopped because Hiyori died',
+        summary: 'Minecraft task stopped because the body died',
         details: { reason: 'death', position: state.position },
       });
       return;
@@ -378,13 +384,14 @@ export function createRuntimeWorkerController(
   return {
     async connect(payload: MinecraftConnectionOptions): Promise<MinecraftStatus> {
       if (samePlayer(payload.owner, payload.username)) {
-        throw new Error('Hiyori cannot follow itself');
+        throw new Error('cannot follow itself');
       }
       const wasConnected = adapter.status().connected;
+      companion = payload.companion !== false;
       await adapter.connect(payload);
       const status = adapter.status();
       const humanPlayers = status.players.filter((player) => !samePlayer(player, status.username));
-      ownerPlayer = payload.owner?.trim()
+      ownerPlayer = !companion ? undefined : payload.owner?.trim()
         || ownerPlayer
         || (samePlayer(status.owner, status.username) ? undefined : status.owner)
         || (humanPlayers.length === 1 ? humanPlayers[0] : undefined);
@@ -485,7 +492,7 @@ export function createRuntimeWorkerController(
     async follow(payload: { player: string }): Promise<{ state: 'following'; player: string }> {
       const username = adapter.status().username;
       if (samePlayer(payload.player, username)) {
-        throw new Error('Hiyori cannot follow itself');
+        throw new Error('cannot follow itself');
       }
       taskActive = false;
       followBlocked = false;
@@ -518,8 +525,8 @@ function withOxygenRecovery(
   recovery: MinecraftSafetyRecovery,
 ): MinecraftActionResult {
   const text = recovery.recovered
-    ? 'Oxygen became unsafe, so the action stopped and Hiyori returned to air. Re-observe the surroundings and choose a safer route before retrying.'
-    : 'Oxygen became unsafe and Hiyori could not confirm a return to air. Stop this task and report the danger.';
+    ? 'Oxygen became unsafe, so the action stopped and the body returned to air. Re-observe the surroundings and choose a safer route before retrying.'
+    : 'Oxygen became unsafe and the body could not confirm a return to air. Stop this task and report the danger.';
   return {
     ...result,
     outcome: recovery.recovered ? 'partial' : 'failed',

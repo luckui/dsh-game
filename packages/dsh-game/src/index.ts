@@ -46,6 +46,9 @@ export const Config = z.object({
   // 旧版的狼人杀座位设置：现在在游戏库「狼人杀」的开局设置里，这两项只在第一次打开开局设置时搬过去
   wolfModel: z.string().default('deepseek-official/deepseek-flash').description('（旧）狼人杀默认模型，已移到游戏库的开局设置').volatile(),
   wolfSeats: z.string().description('（旧）狼人杀座位配置，已移到游戏库的开局设置').volatile(),
+  mcHost: z.string().default('127.0.0.1').description('Minecraft 服务器地址（Java 版）').volatile(),
+  mcPort: z.natural().default(25565).description('Minecraft 服务器端口').volatile(),
+  mcUsername: z.string().default('DaFeiYu').description('大肥鱼在 Minecraft 里的名字（英文、数字、下划线，3~16 个字）').volatile(),
 });
 
 interface HostContext {
@@ -65,6 +68,9 @@ export function apply(ctx: HostContext, config: LiveConfig = {}): void {
     ddlcDir: config.ddlcDir?.get(),
     wolfModel: config.wolfModel?.get(),
     wolfSeats: config.wolfSeats?.get(),
+    mcHost: config.mcHost?.get(),
+    mcPort: config.mcPort?.get(),
+    mcUsername: config.mcUsername?.get(),
   }));
   // 插件卸载（DSH 关闭、重载）时关掉游戏连接、卸载 mod
   ctx.effect(() => () => { void games.stop(); }, 'dsh-game session');

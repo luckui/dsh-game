@@ -286,8 +286,11 @@ export function apply(ctx: AgentContext): void {
       if (!session) return { text: noGame(exec), image: null };
       if (movedAway(exec)) return { text: MOVED_AWAY, image: null };
       games.resume();
-      await voiceOwnWords(ctx, exec, args.mood);
+      // 实时游戏（Minecraft）：世界不等人，边念边等下一个时刻；别的游戏念完再继续
+      const voicing = voiceOwnWords(ctx, exec, args.mood);
+      if (!session.realtime) await voicing;
       const moment = await session.wait(exec.signal, WAIT_MAX_MS);
+      await voicing;
       // 等的时候这局被关掉了（主人结束了这局，或者别的对话开了新局）
       if (games.session !== session) return { text: games.closed?.reason === 'owner' ? CLOSED_BY_OWNER : MOVED_AWAY, image: null };
       broadcast({ type: 'moment', game: session.title, reason: moment.reason, where: moment.where, prompt: moment.prompt, at: Date.now() });
@@ -325,6 +328,13 @@ export function apply(ctx: AgentContext): void {
       const refusal = session.refuse?.(action);
       if (refusal) return refusal;
       games.resume();
+      // 实时游戏：她说话的同时身体就开始动（动作本身立刻返回）；念完再交回结果，免得下一句话叠在这句上
+      if (session.realtime) {
+        const voicing = voiceOwnWords(ctx, exec, args.mood);
+        const result = await session.act(action);
+        await voicing;
+        return result;
+      }
       await voiceOwnWords(ctx, exec, args.mood);
       return session.act(action);
     },

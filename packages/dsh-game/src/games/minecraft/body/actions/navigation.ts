@@ -43,6 +43,24 @@ export function createNavigationActions(): MinecraftActionHandler[] {
       },
     },
     {
+      name: 'go_to',
+      async run(instruction, context) {
+        const position = instruction.args.position as { x?: unknown; y?: unknown; z?: unknown } | undefined;
+        const x = Number(position?.x);
+        const y = Number(position?.y);
+        const z = Number(position?.z);
+        if (![x, y, z].every(Number.isFinite)) throw new Error('go_to needs position {x, y, z}');
+        const started = context.now();
+        const navigation = await context.adapter.navigateToPosition({ x, y, z }, {
+          range: numberArg(instruction.args.range, 1, 0, 16),
+          signal: context.signal,
+        });
+        const label = `${Math.round(x)} ${Math.round(y)} ${Math.round(z)}`;
+        if (!navigation.ok) return navigationFailure(instruction.id, label, navigation, context.now() - started);
+        return success(instruction.id, `arrived near ${label}`, context.now() - started);
+      },
+    },
+    {
       name: 'follow_player',
       async run(instruction, context) {
         const player = stringArg(instruction.args.player ?? instruction.args.playerName, 'player');
@@ -70,7 +88,7 @@ function navigationFailure(
   const waterText = liquids.some((name) => name.includes('water'))
     ? ' Water is nearby.'
     : navigation.environment.inWater
-      ? ' Hiyori is in water.'
+      ? ' The body is in water.'
       : '';
   const position = navigation.endPos as { x: number; y: number; z: number };
   const code = navigation.reason === 'stagnation'

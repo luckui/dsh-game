@@ -8,6 +8,7 @@ export type MinecraftFollowPhase =
 
 export type MinecraftActionName =
   | 'navigate_to_player'
+  | 'go_to'
   | 'follow_player'
   | 'search_entity'
   | 'search_block'

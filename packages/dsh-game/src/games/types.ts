@@ -71,6 +71,8 @@ export interface Moment {
 export interface GameSession {
   readonly id: string;
   readonly title: string;
+  /** 实时游戏（Minecraft）：世界不会停下来等她，她说话的同时身体就开始动 */
+  readonly realtime?: boolean;
   /** 游戏背景和规则（事实），game_start 时交给 agent */
   readonly facts: string;
   /** 装 mod、开游戏；返回给 agent 的说明 */

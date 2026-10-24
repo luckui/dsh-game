@@ -2236,13 +2236,13 @@ export function createMineflayerAdapter(
       await current.pvp?.stop?.();
       current.pathfinder?.stop?.();
       await current.collectBlock?.cancelTask?.();
-      current.end('Hiyori disconnected');
+      current.end('disconnected');
     },
 
     setOwner(player) {
       const normalized = player?.trim() || undefined;
       if (normalized && normalized.toLocaleLowerCase() === bot?.username?.toLocaleLowerCase()) {
-        throw new Error('Hiyori cannot follow itself');
+        throw new Error('cannot follow itself');
       }
       owner = normalized;
       gazeTracker.reset();
@@ -2296,6 +2296,22 @@ export function createMineflayerAdapter(
       return patchedGoto(
         current,
         new goals.GoalNear(target.position.x, target.position.y, target.position.z, options.range),
+        {
+          signal: options.signal,
+          onProgress: (progress) => emit({
+            kind: 'log',
+            level: 'info',
+            message: `[navigate] elapsed=${progress.elapsedMs}ms position=${formatPosition(progress.currentPos)} remaining=${progress.distanceToTarget.toFixed(1)} moved=${progress.distanceTraveled.toFixed(1)} stagnant=${progress.stagnantTicks}`,
+          }),
+        },
+      );
+    },
+
+    async navigateToPosition(position, options) {
+      const current = requireBot(bot);
+      return patchedGoto(
+        current,
+        new goals.GoalNear(position.x, position.y, position.z, options.range),
         {
           signal: options.signal,
           onProgress: (progress) => emit({
@@ -3503,7 +3519,7 @@ function waitForSpawn(bot: any): Promise<void> {
 }
 
 function requireBot(bot: any): any {
-  if (!bot) throw new Error('Hiyori is not connected to Minecraft');
+  if (!bot) throw new Error('not connected to Minecraft');
   return bot;
 }
 

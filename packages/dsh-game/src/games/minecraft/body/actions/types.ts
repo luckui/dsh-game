@@ -12,6 +12,8 @@ export interface MinecraftConnectionOptions {
   port: number;
   username: string;
   owner?: string;
+  /** 陪玩模式（默认 true）：自动认唯一的真人玩家做主人并跟着走。false = 她自己玩，不跟任何人 */
+  companion?: boolean;
 }
 
 export interface CollectionRequest {
@@ -65,6 +67,10 @@ export interface MinecraftBodyAdapter {
     range: number;
     timeoutMs: number;
     dynamic: boolean;
+    signal?: AbortSignal;
+  }): Promise<PathfindResult>;
+  navigateToPosition(position: { x: number; y: number; z: number }, options: {
+    range: number;
     signal?: AbortSignal;
   }): Promise<PathfindResult>;
   stopNavigation(): Promise<void>;
