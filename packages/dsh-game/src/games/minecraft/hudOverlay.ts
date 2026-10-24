@@ -140,6 +140,35 @@ export function hudPayload(assets: HudAssets, hud: MinecraftHudState): string {
   return JSON.stringify({ hud, icons });
 }
 
+/**
+ * 上次的游戏窗口留下的鼠标限制：DSH 被整个结束时，游戏和 HUD 窗口一起被杀，谁都来不及解开（见 C# 里的 ReleaseClip）。
+ * HUD 窗口记着游戏画面在屏幕上的位置（clip.txt）；鼠标还正好被锁在那块地方，就解开。别的程序的限制不碰
+ */
+export function releaseStaleClip(dir: string): void {
+  const file = path.join(dir, 'clip.txt');
+  if (process.platform !== 'win32' || !fs.existsSync(file)) return;
+  const [l, t, r, b] = fs.readFileSync(file, 'utf8').trim().split(',').map(Number);
+  if (![l, t, r, b].every(Number.isFinite)) return;
+  const script = `
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class StaleClip {
+  public struct RECT { public int L, T, R, B; }
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern bool GetClipCursor(out RECT r);
+  [DllImport("user32.dll")] public static extern bool ClipCursor(IntPtr r);
+}
+"@
+[StaleClip]::SetProcessDPIAware() | Out-Null
+$c = New-Object StaleClip+RECT
+[StaleClip]::GetClipCursor([ref]$c) | Out-Null
+if ([Math]::Abs($c.L - ${l}) -le 2 -and [Math]::Abs($c.T - ${t}) -le 2 -and [Math]::Abs($c.R - ${r}) -le 2 -and [Math]::Abs($c.B - ${b}) -le 2) { [StaleClip]::ClipCursor([IntPtr]::Zero) | Out-Null; exit 3 }
+`;
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  spawn('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], { windowsHide: true, stdio: 'ignore' })
+    .on('exit', (code) => { if (code === 3) console.info('[dsh-game] released a mouse clip left by the Minecraft camera'); });
+}
+
 export class HudOverlay {
   private readonly stateFile: string;
   private pid: number | null = null;
@@ -238,6 +267,9 @@ public class DshHud : Form {
   [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
   [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
   [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] static extern bool GetClipCursor(out RECT r);
+  [DllImport("user32.dll")] static extern bool ClipCursor(IntPtr r);
 
   const uint SWP_NOSIZE = 1, SWP_NOMOVE = 2, SWP_NOACTIVATE = 0x10;
   /** HUD 占屏幕最下面这么高（GUI 单位） */
@@ -254,6 +286,8 @@ public class DshHud : Form {
   bool dirty;
   int lastW, lastH, scale;
   string lastTitle;
+  /** 游戏窗口的画面在屏幕上的位置（物理像素） */
+  RECT gameArea;
 
   public static void Run(int pid, string dir, string stateFile) {
     SetProcessDPIAware();
@@ -272,6 +306,15 @@ public class DshHud : Form {
     timer.Start();
   }
 
+  /** 鼠标正被锁在游戏窗口的画面里（差一两个像素也算）：解开 */
+  void ReleaseClip() {
+    if (gameArea.R == 0 && gameArea.B == 0) return;
+    RECT c;
+    if (!GetClipCursor(out c)) return;
+    if (Math.Abs(c.L - gameArea.L) <= 2 && Math.Abs(c.T - gameArea.T) <= 2 && Math.Abs(c.R - gameArea.R) <= 2 && Math.Abs(c.B - gameArea.B) <= 2)
+      ClipCursor(IntPtr.Zero);
+  }
+
   protected override bool ShowWithoutActivation { get { return true; } }
   protected override CreateParams CreateParams {
     get {
@@ -284,9 +327,19 @@ public class DshHud : Form {
 
   void Tick() {
     game.Refresh();
-    if (game.HasExited) { Close(); return; }
+    if (game.HasExited) { ReleaseClip(); Close(); return; }
     if (gameWindow == IntPtr.Zero) gameWindow = game.MainWindowHandle;
     if (gameWindow == IntPtr.Zero) return;
+    // 鼠标限制：游戏进了世界、拿到焦点时会把鼠标锁在自己窗口里（ClipCursor），失去焦点才放开；
+    // 它没放开（被强行结束、焦点被别处拿走）时鼠标就出不了这块地方。不在用游戏窗口时，锁在它里面的限制都解开
+    RECT client; GetClientRect(gameWindow, out client);
+    var corner = new POINT(); ClientToScreen(gameWindow, ref corner);
+    var area = new RECT { L = corner.X, T = corner.Y, R = corner.X + client.R, B = corner.Y + client.B };
+    if (area.L != gameArea.L || area.T != gameArea.T || area.R != gameArea.R || area.B != gameArea.B) {
+      gameArea = area;
+      try { File.WriteAllText(Path.Combine(dir, "clip.txt"), area.L + "," + area.T + "," + area.R + "," + area.B); } catch { }
+    }
+    if (GetForegroundWindow() != gameWindow) ReleaseClip();
     // 游戏窗口的标题（直播时 OBS 按它找窗口）：变了就写下来
     string title = game.MainWindowTitle;
     if (title != lastTitle) {

@@ -154,6 +154,9 @@ export interface LiveBody {
   showGame(source: LiveSource | null): void;
 }
 
+/** Minecraft 摄像机客户端自己的游戏目录（设置、日志、HUD 的贴图和状态） */
+export const minecraftCameraDir = (): string => path.join(process.env.DSH_HOME ?? os.tmpdir(), 'dsh-game', 'mc-camera');
+
 /** 现在在直播吗（直播插件在、而且在播） */
 export const onAir = (): LiveBody | null => {
   const live = hooks.live?.();
@@ -391,7 +394,7 @@ export const GAMES = {
       port: Number(settings.mcPort) || 25565,
       username: settings.mcUsername,
       camera: settings.mcCamera
-        ? { name: settings.mcCameraName, clientDir: settings.mcClientDir, java: settings.mcJava, hudPort: Number(settings.mcHudPort) || 0, gameDir: path.join(process.env.DSH_HOME ?? os.tmpdir(), 'dsh-game', 'mc-camera') }
+        ? { name: settings.mcCameraName, clientDir: settings.mcClientDir, java: settings.mcJava, hudPort: Number(settings.mcHudPort) || 0, gameDir: minecraftCameraDir() }
         : null,
       log: (text) => console.log(text),
       onStateChange: () => announceGameState(),

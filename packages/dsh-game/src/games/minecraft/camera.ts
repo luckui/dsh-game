@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { MinecraftHudState } from './body/contracts.js';
 import { GameJar } from './gameJar.js';
-import { HudAssets, HudOverlay, hudPayload } from './hudOverlay.js';
+import { HudAssets, HudOverlay, hudPayload, releaseStaleClip } from './hudOverlay.js';
 import { HudPage } from './hudPage.js';
 
 export interface CameraOptions {
@@ -121,6 +121,7 @@ export class CameraClient {
     if (this.pid) return;
     const o = this.options;
     writeOptions(o.gameDir, o.root, o.version);
+    releaseStaleClip(path.join(o.gameDir, 'hud'));
     // 库是 CommonJS：按需加载（插件不玩 Minecraft 时不用它）
     const mod = (await import('minecraft-launcher-core')) as any;
     const { Client, Authenticator } = mod.default ?? mod;
@@ -129,7 +130,7 @@ export class CameraClient {
     launcher.on('close', (code: unknown) => {
       o.log?.(`[camera] client closed (${String(code)})`);
       this.pid = null;
-      this.stopHud();
+      this.stopHudSoon();
     });
     const child = await launcher.launch({
       root: o.root,
@@ -256,9 +257,14 @@ for ($i = 0; $i -lt ${times}; $i++) {
 
   stop(): void {
     this.closed = true;
-    this.stopHud();
+    // 先关游戏，HUD 窗口看到它退出会解开它留下的鼠标限制，再关 HUD
     this.killPid(this.pid);
     this.pid = null;
+    this.stopHudSoon();
+  }
+
+  private stopHudSoon(): void {
+    setTimeout(() => this.stopHud(), 1000);
   }
 
   private stopHud(): void {

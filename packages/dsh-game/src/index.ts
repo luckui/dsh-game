@@ -12,11 +12,12 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import z from '@deepseek-ai/schemastery';
-import { GAMES, assetsDir, audio, bindSettings, clipsDir, STEAM_ART, games, hooks, listeners, settings, speeches, watchFrames, wolfSetup, type ArtKind, type GameId, type LiveBody, type Settings, type StageEvent } from './runtime.js';
+import { GAMES, minecraftCameraDir, assetsDir, audio, bindSettings, clipsDir, STEAM_ART, games, hooks, listeners, settings, speeches, watchFrames, wolfSetup, type ArtKind, type GameId, type LiveBody, type Settings, type StageEvent } from './runtime.js';
 import type { WolfSetup } from './games/werewolf/setup.js';
 import { DEFAULT_VOICE } from './tts.js';
 import { deleteCharacter, findDdlcDir } from './games/ddlc/profile.js';
 import { WerewolfSession, devOptions } from './games/werewolf/session.js';
+import { releaseStaleClip } from './games/minecraft/hudOverlay.js';
 
 export const name = 'dsh-game';
 
@@ -103,6 +104,8 @@ export function apply(ctx: HostContext, config: LiveConfig = {}): void {
     }, 1000);
     return () => clearInterval(timer);
   }, 'dsh-game live screen');
+  // 上次 DSH 被整个结束时，Minecraft 摄像机可能把鼠标锁在它窗口那块地方没放开：先解开
+  releaseStaleClip(join(minecraftCameraDir(), 'hud'));
   // 插件卸载（DSH 关闭、重载）时关掉游戏连接、卸载 mod
   ctx.effect(() => () => { void games.stop(); }, 'dsh-game session');
 
