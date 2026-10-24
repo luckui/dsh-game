@@ -85,6 +85,8 @@ export type MinecraftRuntimeEvent =
   | { kind: 'disconnected'; reason: string }
   /** 盖房子的进度（每盖完一层） */
   | { kind: 'build-progress'; text: string }
+  /** 盖房子：这一格已经是图纸上的方块了（刚放好的，或者本来就是） */
+  | { kind: 'build-placed'; x: number; y: number; z: number; name: string }
   | { kind: 'log'; level: 'info' | 'warn' | 'error'; message: string };
 
 export type MinecraftWorkerMessage =

@@ -80,9 +80,10 @@ async function inventoryMatches(extra: string[] = []): Promise<void> {
 }
 
 /** 做一件事；后台做的就一直等到它报「做完了 / 没成 / 停下了」，返回那一行 */
-async function act(action: string, args: { name?: string; index?: number; text?: string } = {}, timeoutMs = 180_000): Promise<string> {
+async function act(action: string, args: { name?: string; index?: number; text?: string } = {}, timeoutMs = 180_000, onStart?: () => Promise<void>): Promise<string> {
   const reply = await session.act({ action, ...args });
   note(`act ${action} ${JSON.stringify(args)} → ${reply.split('\n')[0].slice(0, 160)}`);
+  if (onStart) void onStart();
   if (!/^开始|排上了/.test(reply)) return reply;
   const label = reply.match(/^开始(.+?)。/)?.[1] ?? reply.match(/「(.+?)」排上了/)?.[1] ?? '';
   const end = Date.now() + timeoutMs;
@@ -113,7 +114,7 @@ function reportedDelta(line: string): Record<string, number> {
 async function step(
   action: string,
   args: { name?: string; index?: number; text?: string },
-  expect: { ok?: RegExp; gain?: Record<string, number>; atLeast?: Record<string, number>; noDrops?: boolean; timeoutMs?: number } = {},
+  expect: { ok?: RegExp; gain?: Record<string, number>; atLeast?: Record<string, number>; noDrops?: boolean; timeoutMs?: number; onStart?: () => Promise<void> } = {},
 ): Promise<string> {
   await onArena();
   const watch = [...new Set([...Object.keys(expect.gain ?? {}), ...Object.keys(expect.atLeast ?? {})])];
@@ -121,7 +122,7 @@ async function step(
   const inv0 = await bodyInventory();
   for (const n of [...new Set([...Object.keys(inv0), ...watch])]) before[n] = await serverCount(n);
   const dropsBefore = expect.noDrops ? await droppedNearby() : 0;
-  const line = await act(action, args, expect.timeoutMs);
+  const line = await act(action, args, expect.timeoutMs, expect.onStart);
   await sleep(800);
   check((expect.ok ?? /做完了/).test(line), `结果：${(expect.ok ?? /做完了/).source}`);
   const reported = reportedDelta(line);
@@ -361,7 +362,22 @@ async function buildCases(): Promise<void> {
   await rcon(`give ${NAME} oak_door 1`);
   await rcon(`give ${NAME} cobblestone 64`);
   await sleep(1000);
-  const cabin = await step('build', { name: 'cabin', text: `${cabinOrigin.x} ${cabinOrigin.y} ${cabinOrigin.z}` }, { ok: /：做完了/, timeoutMs: 600_000 });
+  // 虚影：开工时整座房子都在（149 块 + 门的上半格），盖到一半少了，盖完一个不剩
+  const ghosts = async () => Number((await rcon('execute if entity @e[type=block_display,tag=dsh_ghost]')).match(/count:\s*(\d+)/i)?.[1] ?? 0);
+  const ghostCounts: number[] = [];
+  const cabin = await step('build', { name: 'cabin', text: `${cabinOrigin.x} ${cabinOrigin.y} ${cabinOrigin.z}` }, {
+    ok: /：做完了/, timeoutMs: 600_000,
+    onStart: async () => {
+      ghostCounts.push(await ghosts());
+      await sleep(40_000);
+      ghostCounts.push(await ghosts());
+    },
+  });
+  ghostCounts.push(await ghosts());
+  note(`虚影个数：开工 ${ghostCounts[0]}、40 秒后 ${ghostCounts[1]}、盖完 ${ghostCounts[2]}`);
+  check(ghostCounts[0] === 150, `开工时整座虚影都在（${ghostCounts[0]}，应为 150）`);
+  check(ghostCounts[1] > 0 && ghostCounts[1] < ghostCounts[0], `盖的时候虚影一块块变少（${ghostCounts[1]}）`);
+  check(ghostCounts[2] === 0, `盖完虚影都撤了（还剩 ${ghostCounts[2]}）`);
   note(`她看到的：${cabin.slice(0, 300)}`);
   const cabinWrong = await wrongBlocks(TEMPLATES.cabin.text, cabinOrigin);
   check(cabinWrong.length === 0, `每块都对（不对的 ${cabinWrong.length} 块：${cabinWrong.slice(0, 5).join('；')}）`);
@@ -414,7 +430,7 @@ async function main(): Promise<void> {
   session = new MinecraftSession({
     workerPath: path.join(ROOT, 'packages', 'dsh-game', 'lib', 'minecraft-worker.cjs'),
     host: '127.0.0.1', port: Number(props['server-port'] || 25565), username: NAME,
-    record: () => {}, camera: null, rcon: null,
+    record: () => {}, camera: null, rcon: RCON,
     log: (text) => fs.appendFileSync(LOG, `${new Date().toISOString()} ${text}\n`),
   });
   try {

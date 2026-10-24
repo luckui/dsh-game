@@ -1,0 +1,84 @@
+/**
+ * 虚影：盖房子之前，在图纸的每一格放一个半透明的「方块展示实体」（block_display，1.19.4 起有），
+ * 整座房子先以发光的玻璃虚影出现；她每放好一块真方块，那一格的虚影就消失，盖完正好没了。
+ * 给看的人看（摄像机客户端、直播画面、服务器上的玩家）；她自己看不到画面。要 RCON（命令由服务器执行）。
+ *
+ * 颜色按材料分：木头橙、石头灰、玻璃浅蓝、门和火把黄、黑曜石紫、羊毛粉、泥土沙子黄绿，别的白。
+ * 虚影比一格小一点点（0.96），真方块放上去时不会和它闪烁打架。
+ */
+import { rconBatch, type RconTarget } from './rcon.js';
+
+export interface GhostCell {
+  x: number;
+  y: number;
+  z: number;
+  name: string;
+}
+
+const WOOD = /^(oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|bamboo|crimson|warped|pale_oak)_|_log$|_wood$|_planks$|^bamboo_block$|^crafting_table$|^bookshelf$|^chest$|^barrel$/;
+const STONE = /stone|cobble|brick|deepslate|andesite|granite|diorite|blackstone|basalt|tuff|calcite|terracotta|concrete|prismarine|purpur|quartz|end_stone|netherrack|^furnace$|^smooth_/;
+
+function glassFor(name: string): string {
+  if (/glass/.test(name)) return 'light_blue_stained_glass';
+  if (/_door$|torch$|lantern$|_trapdoor$|_fence_gate$|_button$|^lever$|ladder$/.test(name)) return 'yellow_stained_glass';
+  if (/obsidian/.test(name)) return 'purple_stained_glass';
+  if (/wool$|carpet$|_bed$/.test(name)) return 'pink_stained_glass';
+  if (WOOD.test(name)) return 'orange_stained_glass';
+  if (STONE.test(name)) return 'light_gray_stained_glass';
+  if (/dirt|grass_block|sand|gravel|clay|mud|moss/.test(name)) return 'lime_stained_glass';
+  return 'white_stained_glass';
+}
+
+const tagOf = (id: string, p: { x: number; y: number; z: number }) => `dsh_ghost_${id}_${p.x}_${p.y}_${p.z}`;
+
+export class GhostBuild {
+  private pending: string[] = [];
+  private flushing: Promise<unknown> = Promise.resolve();
+  private timer: NodeJS.Timeout | null = null;
+
+  constructor(private readonly target: RconTarget, readonly id: string, private readonly log?: (text: string) => void) {}
+
+  /** 放出虚影（门这类两格高的上下两格都放） */
+  async show(cells: GhostCell[]): Promise<void> {
+    const commands: string[] = [];
+    for (const c of cells) {
+      const spots = /_door$/.test(c.name) ? [c, { ...c, y: c.y + 1 }] : [c];
+      for (const p of spots) {
+        commands.push(`summon block_display ${p.x + 0.5} ${p.y + 0.5} ${p.z + 0.5} {block_state:{Name:"minecraft:${glassFor(c.name)}"},`
+          + `transformation:{left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f],translation:[-0.48f,-0.48f,-0.48f],scale:[0.96f,0.96f,0.96f]},`
+          + `brightness:{sky:15,block:15},Tags:["dsh_ghost","dsh_ghost_${this.id}","${tagOf(this.id, p)}"]}`);
+      }
+    }
+    // 一次几百条：分批发，每批一个连接
+    for (let i = 0; i < commands.length; i += 200) {
+      await rconBatch(this.target, commands.slice(i, i + 200), 10_000).catch((err: Error) => this.log?.(`[ghost] could not show: ${err.message}`));
+    }
+  }
+
+  /** 这一格的真方块放好了：去掉它的虚影（攒半秒一起发） */
+  remove(p: { x: number; y: number; z: number; name?: string }): void {
+    this.pending.push(`kill @e[type=block_display,tag=${tagOf(this.id, p)}]`);
+    if (p.name && /_door$/.test(p.name)) this.pending.push(`kill @e[type=block_display,tag=${tagOf(this.id, { ...p, y: p.y + 1 })}]`);
+    this.timer ??= setTimeout(() => this.flush(), 500);
+  }
+
+  private flush(): Promise<unknown> {
+    this.timer = null;
+    const commands = this.pending.splice(0);
+    if (!commands.length) return this.flushing;
+    this.flushing = this.flushing.then(() => rconBatch(this.target, commands, 10_000)).catch(() => {});
+    return this.flushing;
+  }
+
+  /** 这次盖完（成没成都一样）：剩下的虚影都去掉 */
+  async clear(): Promise<void> {
+    if (this.timer) clearTimeout(this.timer);
+    await this.flush();
+    await rconBatch(this.target, [`kill @e[type=block_display,tag=dsh_ghost_${this.id}]`]).catch(() => {});
+  }
+
+  /** 去掉所有虚影（这局开始、结束时：上一局 DSH 被关掉时可能留着） */
+  static clearAll(target: RconTarget): Promise<unknown> {
+    return rconBatch(target, ['kill @e[type=block_display,tag=dsh_ghost]']).catch(() => {});
+  }
+}

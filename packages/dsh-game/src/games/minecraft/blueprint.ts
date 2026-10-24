@@ -193,6 +193,20 @@ export function clearCells(bp: Blueprint, origin: { x: number; y: number; z: num
   return out;
 }
 
+/**
+ * 虚影要放的格子：方块多了（超过 limit）只放外壳（从外面看得到的：六个方向里有一边挨着空的），里面看不见的不放
+ */
+export function ghostCells(bp: Blueprint, origin: { x: number; y: number; z: number }, limit = 600): Placement[] {
+  const all = placements(bp, origin);
+  if (all.length <= limit) return all;
+  return all.filter((p) => {
+    const k = p.y - origin.y;
+    const r = p.z - origin.z;
+    const c = p.x - origin.x;
+    return !solid(bp, k - 1, r, c) || !solid(bp, k + 1, r, c) || !solid(bp, k, r - 1, c) || !solid(bp, k, r + 1, c) || !solid(bp, k, r, c - 1) || !solid(bp, k, r, c + 1);
+  });
+}
+
 /** 要用的材料：方块名 → 个数（门按扇算） */
 export function materials(bp: Blueprint): Record<string, number> {
   const out: Record<string, number> = {};

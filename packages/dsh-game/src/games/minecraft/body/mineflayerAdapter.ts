@@ -2443,6 +2443,7 @@ export function createMineflayerAdapter(
         },
         pickup: async (radius) => { await collectItemDrops(radius, options.signal); },
         progress: (text) => emit({ kind: 'build-progress', text }),
+        placed: (b) => emit({ kind: 'build-placed', x: b.x, y: b.y, z: b.z, name: b.name }),
         log: (text) => emit({ kind: 'log', level: 'warn', message: text }),
       });
     },

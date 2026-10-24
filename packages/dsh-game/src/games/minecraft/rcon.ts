@@ -11,6 +11,12 @@ export interface RconTarget {
 }
 
 export function rcon(target: RconTarget, command: string, timeoutMs = 5000): Promise<string> {
+  return rconBatch(target, [command], timeoutMs).then((replies) => replies[0]);
+}
+
+/** 一个连接里按顺序发一串命令（一次发几百条时比每条新开连接快得多） */
+export function rconBatch(target: RconTarget, commands: string[], timeoutMs = 5000): Promise<string[]> {
+  if (!commands.length) return Promise.resolve([]);
   return new Promise((resolve, reject) => {
     const sock = net.connect(target.port, target.host);
     const packet = (id: number, type: number, body: string) => {
@@ -24,6 +30,8 @@ export function rcon(target: RconTarget, command: string, timeoutMs = 5000): Pro
     };
     let data = Buffer.alloc(0);
     let authed = false;
+    const replies: string[] = [];
+    // 每条命令单独计时：一串命令总共可以很久，但一条没回音就算断了
     sock.setTimeout(timeoutMs, () => { sock.destroy(); reject(new Error('RCON timeout')); });
     sock.on('error', reject);
     sock.on('connect', () => sock.write(packet(1, 3, target.password)));
@@ -37,10 +45,15 @@ export function rcon(target: RconTarget, command: string, timeoutMs = 5000): Pro
         if (!authed) {
           if (id === -1) { sock.destroy(); reject(new Error('RCON password rejected')); return; }
           authed = true;
-          sock.write(packet(2, 2, command));
+          sock.write(packet(2, 2, commands[0]));
         } else {
-          sock.end();
-          resolve(body);
+          replies.push(body);
+          if (replies.length === commands.length) {
+            sock.end();
+            resolve(replies);
+          } else {
+            sock.write(packet(2 + replies.length, 2, commands[replies.length]));
+          }
         }
       }
     });

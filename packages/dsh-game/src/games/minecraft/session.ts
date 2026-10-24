@@ -14,9 +14,10 @@ import type { GameAction, GameActionSpec, GameSession, LiveSource, Moment, RunEv
 import type { MinecraftActionResult, MinecraftEnvironmentSnapshot, MinecraftHudState, MinecraftObservedEntity } from './body/contracts.js';
 import type { MinecraftRuntimeEvent, MinecraftStatus } from './body/protocol.js';
 import { MinecraftRuntimeManager } from './body/runtimeManager.js';
-import { rcon, type RconTarget } from './rcon.js';
+import { rcon, rconBatch, type RconTarget } from './rcon.js';
 import { CameraClient, findJava, findMinecraftRoot } from './camera.js';
-import { TEMPLATES, clearCells, describeBlueprint, materials, parseBlueprint, placements, type Blueprint } from './blueprint.js';
+import { TEMPLATES, clearCells, describeBlueprint, ghostCells, materials, parseBlueprint, placements, type Blueprint } from './blueprint.js';
+import { GhostBuild } from './ghost.js';
 
 export interface MinecraftOptions {
   /** 打包好的身体子进程（lib/minecraft-worker.cjs） */
@@ -133,6 +134,9 @@ export class MinecraftSession implements GameSession {
   private camera: CameraClient | null = null;
   /** 她画好的图纸：名字 → 图纸（这局里一直在） */
   private designs = new Map<string, Blueprint>();
+  /** 盖房子的虚影：动作的说法（「盖「小木屋」」）→ 虚影 */
+  private ghosts = new Map<string, GhostBuild>();
+  private ghostSeq = 0;
   private preflightFailed = false;
   /** 开局前检查没过：这局其实没开 */
   get started(): boolean {
@@ -140,10 +144,14 @@ export class MinecraftSession implements GameSession {
   }
   private hudTimer: NodeJS.Timeout | null = null;
   private hudBusy = false;
+  /** 新开的摄像机挂稳以后切到背后视角（只切这一次） */
+  private defaultViewSet = false;
   /** 摄像机的人称（F5 三档循环：她的视角 → 背后 → 正面）；新开的客户端是她的视角 */
   perspective: 'first' | 'back' | 'front' = 'first';
   private cameraSeen = false;
   private lastCameraCheck = 0;
+  /** 上一次看到她的位置（看她有没有一下子跑远） */
+  private lastBodyPos: { x: number; y: number; z: number } | null = null;
   /** 给主人看的摄像机状态（「游戏」标签页显示） */
   private cameraNoteText = '';
   private set cameraNote(text: string) {
@@ -193,6 +201,8 @@ export class MinecraftSession implements GameSession {
       return `进不了服务器 ${this.options.host}:${this.options.port}：${(err as Error).message}。主人要先开好服务器（Java 版）。`;
     }
     this.disconnected = false;
+    // 上一局（DSH 被关掉时）可能留着虚影
+    if (this.options.rcon) void GhostBuild.clearAll(this.options.rcon);
     void this.startCamera();
     for (const p of this.status.players) if (p !== this.status.username && p !== this.cameraName) this.players.add(p);
     this.options.record({ type: 'start', game: 'minecraft' });
@@ -200,7 +210,7 @@ export class MinecraftSession implements GameSession {
     this.lastHealth = this.snapshot?.body?.health ?? null;
     this.lastPhase = phaseOf(this.snapshot?.world?.timeOfDay);
     this.poller = setInterval(() => void this.poll().catch(() => {}), POLL_MS);
-    return this.describeNow(`进了服务器 ${this.options.host}:${this.options.port}`);
+    return this.describeNow(`进了服务器 ${this.options.host}:${this.options.port}（Minecraft ${this.status?.version ?? '版本不明'}，有哪些方块、物品和配方按这个版本来）`);
   }
 
   async wait(signal: AbortSignal, maxMs: number): Promise<Moment> {
@@ -281,6 +291,7 @@ export class MinecraftSession implements GameSession {
         this.queue = [];
         this.running = null;
         await runtime.command('stop', {});
+        await this.clearGhosts();
         return was ? `停下了（原来在${was.label}${dropped ? `，排着的 ${dropped} 件也取消了` : ''}）。` : '本来就没在做什么。';
       }
       case 'find': {
@@ -313,6 +324,15 @@ export class MinecraftSession implements GameSession {
         break;
     }
     if (!LONG.has(action.action)) return `没有这个动作：${action.action}`;
+    // 盖房子：先在那个位置放出虚影（有 RCON 时），排着队的也先放
+    if (action.action === 'build' && this.options.rcon) {
+      const title = action.name!.trim();
+      const label = `盖「${title}」`;
+      await this.ghosts.get(label)?.clear();
+      const ghost = new GhostBuild(this.options.rcon, `b${++this.ghostSeq}`, this.options.log);
+      this.ghosts.set(label, ghost);
+      await ghost.show(ghostCells(this.designs.get(title)!, xyz!));
+    }
     const [bodyAction, args, label] = ((): [string, Record<string, unknown>, string] => {
       switch (action.action) {
         case 'collect': return ['collect_item', { item: name, quantity: count, radius: 64 }, `采集 ${name} ×${count}`];
@@ -371,6 +391,7 @@ export class MinecraftSession implements GameSession {
 
   async stop(): Promise<void> {
     this.finished = true;
+    await this.clearGhosts();
     if (this.poller) clearInterval(this.poller);
     this.poller = null;
     this.unsubscribe?.();
@@ -403,7 +424,20 @@ export class MinecraftSession implements GameSession {
     return was.label;
   }
 
+  /** 去掉所有虚影（停下、这局结束时） */
+  private async clearGhosts(): Promise<void> {
+    const ghosts = [...this.ghosts.values()];
+    this.ghosts.clear();
+    await Promise.all(ghosts.map((g) => g.clear()));
+  }
+
   private finishRunning(running: Running, result: MinecraftActionResult | null, error?: string): void {
+    // 这次盖完了（成没成都一样）：剩下的虚影撤掉
+    const ghost = this.ghosts.get(running.label);
+    if (ghost) {
+      this.ghosts.delete(running.label);
+      void ghost.clear();
+    }
     // 被新动作顶掉的：不用再报
     if (this.running !== running && result?.outcome === 'cancelled') return;
     if (this.running === running) this.running = null;
@@ -431,6 +465,9 @@ export class MinecraftSession implements GameSession {
       }
       case 'build-progress':
         this.push(event.text, false);
+        break;
+      case 'build-placed':
+        if (this.running) this.ghosts.get(this.running.label)?.remove(event);
         break;
       case 'death':
         // 正在做的事由身体自己报（死的时候它会停掉并回报），这里不清，免得两边对不上
@@ -486,7 +523,12 @@ export class MinecraftSession implements GameSession {
     const moved = this.lastDimension !== null && dimension !== this.lastDimension;
     this.lastDimension = dimension;
     if (moved || Date.now() - this.lastRespectate >= RESPECTATE_MS) void this.attachSpectators();
-    void this.keepCameraAttached();
+    // 她一下子跑远了（死了在出生点复活、被传送）或者换了维度：服务器那边旁观会跟过去，摄像机客户端的画面却会停在原地，重新挂一次
+    const here = s?.body?.position;
+    const jumped = !!here && !!this.lastBodyPos && Math.hypot(here.x - this.lastBodyPos.x, here.y - this.lastBodyPos.y, here.z - this.lastBodyPos.z) > 24;
+    if (here) this.lastBodyPos = { x: here.x, y: here.y, z: here.z };
+    if (jumped || moved) void this.reattachCamera();
+    else void this.keepCameraAttached();
     // 新出现在 12 格内的敌对生物（同一只只报一次）
     for (const e of hostiles(s).filter((h) => h.distance <= 12)) {
       const key = `${e.name}@${Math.round(e.position.x / 4)},${Math.round(e.position.z / 4)}`;
@@ -527,6 +569,7 @@ export class MinecraftSession implements GameSession {
       return;
     }
     this.perspective = 'first';
+    this.defaultViewSet = false;
     this.camera = new CameraClient({
       root, version, username: cam.name, host: this.options.host, port: this.options.port,
       gameDir: cam.gameDir, java: findJava(cam.java, root), hudPort: cam.hudPort, log: this.options.log,
@@ -584,6 +627,16 @@ export class MinecraftSession implements GameSession {
     this.lastCameraCheck = 0;
   }
 
+  /** 摄像机重新挂一次：先放开，传送到她身边，等客户端加载好周围，再挂上 */
+  private async reattachCamera(): Promise<void> {
+    const target = this.options.rcon;
+    if (!target || !this.cameraSeen) return;
+    this.lastCameraCheck = Date.now();
+    await rconBatch(target, [`execute as ${this.cameraName} run spectate`, `tp ${this.cameraName} ${this.options.username}`]).catch(() => {});
+    await new Promise((r) => setTimeout(r, 1500));
+    await rcon(target, `spectate ${this.options.username} ${this.cameraName}`).catch(() => {});
+  }
+
   /** 摄像机没挂在她身上（坐标对不上）就挂上：刚进服、她复活、换维度、被甩开时都会这样；挂着的不动它，画面不闪 */
   private async keepCameraAttached(): Promise<void> {
     const target = this.options.rcon;
@@ -595,6 +648,11 @@ export class MinecraftSession implements GameSession {
     const nums = reply.match(/-?\d+(\.\d+)?(?=d)/g)?.map(Number);
     const attached = nums && nums.length >= 3 && Math.hypot(nums[0] - me.x, nums[1] - me.y, nums[2] - me.z) < 2;
     if (!attached) await rcon(target, `spectate ${this.options.username} ${this.cameraName}`).catch(() => {});
+    // 第一次挂稳：默认切到背后的第三人称（能看到她自己在干什么），之后主人怎么切就怎么样
+    if (attached && !this.defaultViewSet) {
+      this.defaultViewSet = true;
+      await this.setClientView('back');
+    }
   }
 
   /** 把旁观模式的玩家挂到她身上（第一人称跟着她；F5 换第三人称）。没配 RCON 就什么都不做 */

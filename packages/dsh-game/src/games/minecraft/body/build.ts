@@ -40,6 +40,8 @@ export interface BuildHelpers {
   /** 捡附近的掉落物 */
   pickup(radius: number): Promise<void>;
   progress(text: string): void;
+  /** 这一格已经是图纸上的方块了（虚影可以撤了） */
+  placed(b: BuildBlock): void;
   log(text: string): void;
 }
 
@@ -93,6 +95,7 @@ export async function buildStructure(bot: any, req: BuildRequest, helpers: Build
     return done(started, 'failed', `these are not blocks you can place in Minecraft ${bot.version}: ${unknown.join(', ')}`, {}, { code: 'unknown_item', recoverable: true, details: { unknown } });
   }
   const todo = req.blocks.filter((b) => !matches(bot, b));
+  for (const b of req.blocks) if (!todo.includes(b)) helpers.placed(b);
   const need: Record<string, number> = {};
   for (const b of todo) if (!nameMatches(bot, b)) need[b.name] = (need[b.name] ?? 0) + 1;
   const missing = Object.entries(need).filter(([n, c]) => (before[n] ?? 0) < c).map(([n, c]) => `${n} ${c - (before[n] ?? 0)} more (need ${c}, have ${before[n] ?? 0})`);
@@ -144,13 +147,23 @@ export async function buildStructure(bot: any, req: BuildRequest, helpers: Build
         const rank = (b: BuildBlock) => (hasNeighbour(bot, b) ? 0 : 1000) + me.distanceTo(new Vec3(b.x, b.y, b.z));
         row.sort((a, b) => rank(a) - rank(b));
         const b = row.shift()!;
-        await placeOne(bot, b, helpers).catch((err: Error) => failed.push(`${b.name} at ${key(b)} (${err.message})`));
+        await placeOne(bot, b, helpers).then(() => helpers.placed(b), (err: Error) => failed.push(`${b.name} at ${key(b)} (${err.message})`));
       }
       helpers.progress(`${req.label}: layer ${i + 1}/${layers.length} done`);
     }
     for (const b of attached) {
       if (req.signal.aborted) throw new Error('cancelled');
-      await placeOne(bot, b, helpers).catch((err: Error) => failed.push(`${b.name} at ${key(b)} (${err.message})`));
+      await placeOne(bot, b, helpers).then(() => helpers.placed(b), (err: Error) => failed.push(`${b.name} at ${key(b)} (${err.message})`));
+    }
+    // 补一遍：没放上的（当时没处贴着放、放偏了……）现在周围多半有东西了，再放一次
+    const retry = req.blocks.filter((b) => !nameMatches(bot, b));
+    if (retry.length) {
+      failed.length = 0;
+      retry.sort((a, b) => a.y - b.y);
+      for (const b of retry) {
+        if (req.signal.aborted) throw new Error('cancelled');
+        await placeOne(bot, b, helpers).then(() => helpers.placed(b), (err: Error) => failed.push(`${b.name} at ${key(b)} (${err.message})`));
+      }
     }
   } catch (err) {
     bot.pathfinder.setMovements(oldMovements);
@@ -212,6 +225,8 @@ async function placeOne(bot: any, b: BuildBlock, helpers: BuildHelpers): Promise
   const target = new Vec3(b.x, b.y, b.z);
   if (!b.props.facing && !b.props.half && !b.props.type) {
     await helpers.place(item, target);
+    // 放方块的函数在目标附近找到同样的方块就算放好了：这里要的是正好这一格
+    if (!nameMatches(bot, b)) throw new Error('it landed somewhere else');
     return;
   }
   // 要朝向的：走到旁边，找一个能贴着放的面，转到要的方向，不让放方块时再转头
