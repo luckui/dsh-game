@@ -6,7 +6,7 @@ export function createProductionActions(): MinecraftActionHandler[] {
       name: 'craft_item',
       async run(instruction, context) {
         const item = stringArg(instruction.args.item, 'item');
-        const quantity = numberArg(instruction.args.maxCount ?? 1, 1, 1, 64);
+        const quantity = numberArg(instruction.args.quantity ?? instruction.args.maxCount, 1, 1, 64);
         const result = await context.adapter.craftItem({
           actionId: instruction.id,
           item,

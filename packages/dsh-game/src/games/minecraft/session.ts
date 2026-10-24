@@ -56,7 +56,7 @@ const IDLE_MAX_MS = 120_000;
 
 const ACTIONS: GameActionSpec[] = [
   { action: 'goal', description: '写下 / 改掉你的长期目标（比如「打败末影龙」「盖一个小木屋」），之后每个时刻都会提醒你', params: { text: '目标' } },
-  { action: 'collect', description: '采集一种东西：自己找、走过去、挖、捡起来，直到背包里多了这么多（后台做）', params: { name: '物品的英文 id，比如 oak_log、cobblestone、iron_ore', index: '数量（默认 1）' } },
+  { action: 'collect', description: '采集一种东西：自己找、走过去、挖、捡起来，直到背包里多了这么多（后台做）。各种原木（oak_log、spruce_log……）算同一种，砍的是最近的树；木板、木棍、工作台用哪种木头都行', params:{ name: '物品的英文 id，比如 oak_log、cobblestone、iron_ore', index: '数量（默认 1）' } },
   { action: 'craft', description: '合成（需要工作台的会自己找或放一个；缺的中间材料会先合成）（后台做）', params: { name: '物品的英文 id，比如 crafting_table、wooden_pickaxe、torch', index: '数量（默认 1）' } },
   { action: 'smelt', description: '用熔炉烧东西（后台做）', params: { name: '要得到的东西的英文 id，比如 iron_ingot、cooked_beef', index: '数量（默认 1）' } },
   { action: 'go', description: '走到一个坐标（后台做）', params: { text: '坐标「x y z」' } },

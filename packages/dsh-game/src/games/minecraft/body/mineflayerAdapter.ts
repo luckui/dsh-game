@@ -741,7 +741,8 @@ export function createMineflayerAdapter(
     everSpawned = true;
     lastHealth = current.health;
     if (current.entity?.position) lastBreathablePosition = vector(current.entity.position);
-    current.autoEat?.setOpts?.({ minHunger: 16, strictErrors: false });
+    // 吃完不换回原来拿的东西：自动吃是吃完以后才去换回的（不等它换完），会撞上别的点格子的动作（合成）；干活前身体会自己换工具
+    current.autoEat?.setOpts?.({ minHunger: 16, strictErrors: false, returnToLastItem: false });
     current.autoEat?.enableAuto?.();
     notifyFoodState(current, policyHandlers);
     notifyPlayers(current, emit, policyHandlers);
@@ -1132,6 +1133,47 @@ export function createMineflayerAdapter(
   }
 
   async function executeCraftPlanSteps(
+    current: any,
+    plan: CraftPlan,
+    signal?: AbortSignal,
+    targetItem?: string,
+    onPlaced?: (placed: boolean) => void,
+  ): Promise<void> {
+    // 合成是一串点格子：自动吃东西同时去换手上的东西会把格子点乱，鼠标上剩的东西就被扔到地上。
+    // 合成期间先停掉自动吃（正在吃就等吃完），合成完（成没成都一样）把鼠标上剩的东西放回背包
+    const autoEat = current.autoEat;
+    const eatWasOn = !!autoEat?.enabled;
+    if (eatWasOn) autoEat.disableAuto();
+    for (let waited = 0; autoEat?.isEating && waited < 5000; waited += 100) await new Promise((r) => setTimeout(r, 100));
+    try {
+      await runCraftPlanSteps(current, plan, signal, targetItem, onPlaced);
+    } finally {
+      await tidyCrafting(current).catch(() => {});
+      if (eatWasOn) autoEat.enableAuto();
+    }
+  }
+
+  /**
+   * 合成中途出错时，鼠标上和合成格里可能还剩着东西（合成格里的东西不算在背包里，看着就像没了）：都放回背包，背包满了才会扔。
+   * 合成格：背包界面是 1~4（2x2），工作台界面是 1~9
+   */
+  async function tidyCrafting(current: any): Promise<void> {
+    const window = current.currentWindow ?? current.inventory;
+    if (!window) return;
+    if (window.selectedItem) {
+      emit({ kind: 'log', level: 'warn', message: `[craft] ${window.selectedItem.name} x${window.selectedItem.count} left on the cursor; putting it back` });
+      await current.putSelectedItemRange(window.inventoryStart, window.inventoryEnd, window, null);
+    }
+    const gridEnd = window === current.inventory ? 4 : window.type === 'minecraft:crafting' || window.type === 'minecraft:crafting_table' ? 9 : 0;
+    for (let slot = 1; slot <= gridEnd; slot++) {
+      const item = window.slots[slot];
+      if (!item) continue;
+      emit({ kind: 'log', level: 'warn', message: `[craft] ${item.name} x${item.count} left in crafting slot ${slot}; putting it back` });
+      await current.putAway(slot);
+    }
+  }
+
+  async function runCraftPlanSteps(
     current: any,
     plan: CraftPlan,
     signal?: AbortSignal,
