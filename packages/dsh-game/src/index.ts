@@ -12,7 +12,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import z from '@deepseek-ai/schemastery';
-import { GAMES, assetsDir, audio, bindSettings, clipsDir, STEAM_ART, games, hooks, listeners, settings, speeches, watchFrames, wolfSetup, type ArtKind, type GameId, type Settings, type StageEvent } from './runtime.js';
+import { GAMES, assetsDir, audio, bindSettings, clipsDir, STEAM_ART, games, hooks, listeners, settings, speeches, watchFrames, wolfSetup, type ArtKind, type GameId, type LiveBody, type Settings, type StageEvent } from './runtime.js';
 import type { WolfSetup } from './games/werewolf/setup.js';
 import { DEFAULT_VOICE } from './tts.js';
 import { deleteCharacter, findDdlcDir } from './games/ddlc/profile.js';
@@ -54,6 +54,7 @@ export const Config = z.object({
   mcClientDir: z.string().description('装好游戏的 .minecraft 目录（HMCL 或官方启动器装的；不填就用官方启动器的默认位置）').volatile(),
   mcJava: z.string().description('Java 21 的路径（不填就自动找 HMCL / 官方启动器带的）').volatile(),
   mcCameraName: z.string().default('DaFeiYuCam').description('摄像机在服务器里的名字').volatile(),
+  mcHudPort: z.natural().default(7391).description('摄像机 HUD 网页的端口（血量、饱食度、快捷栏；直播时作为 OBS 浏览器源叠在游戏窗口上，0 = 不开）').volatile(),
   mcViewPort: z.natural().default(0).description('（实验）网页 3D 画面的端口，0 = 不开').volatile(),
   mcRconPassword: z.string().role('secret').description('自己服务器的 RCON 密码（server.properties 里的 rcon.password）；填了的话，旁观模式的玩家会自动挂到她身上').volatile(),
 });
@@ -85,7 +86,25 @@ export function apply(ctx: HostContext, config: LiveConfig = {}): void {
     mcClientDir: config.mcClientDir?.get(),
     mcJava: config.mcJava?.get(),
     mcCameraName: config.mcCameraName?.get(),
+    mcHudPort: config.mcHudPort?.get(),
   }));
+  // 直播插件（dsh-livestream）在的话，它提供直播身体：在播时她的话由它念，游戏画面由它放上舞台
+  hooks.live = () => ctx.get?.('liveBody');
+  ctx.effect(() => () => { hooks.live = undefined; }, 'dsh-game live body');
+  // 在播时把这局游戏的画面交给直播插件（开局、画面准备好、下播、这局结束时都会变）
+  let shown = 'null';
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      const live = hooks.live?.();
+      if (!live) return;
+      const source = live.onAir ? (games.session?.liveSource?.() ?? null) : null;
+      const key = JSON.stringify(source);
+      if (key === shown) return;
+      shown = key;
+      live.showGame(source);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, 'dsh-game live screen');
   // 插件卸载（DSH 关闭、重载）时关掉游戏连接、卸载 mod
   ctx.effect(() => () => { void games.stop(); }, 'dsh-game session');
 
@@ -282,8 +301,32 @@ export function apply(ctx: HostContext, config: LiveConfig = {}): void {
 
   // 开发测试：跳到某个段落 / 显示某张图（分段测试用；只在启动环境里有 DSH_GAME_DEV=1 时才有这个路由）
   if (process.env.DSH_GAME_DEV === '1') {
+    let devLive: (LiveBody & { onAir: boolean; shown: unknown; calls: Set<() => void> }) | null = null;
     route('/api/dsh-game/dev', ['POST'], async (request) => {
       const params = new URL(request.url).searchParams;
+      // 假装在直播（没装直播插件时测约定）：live=on / off 开播下播，live=call 直播间来消息；返回放上舞台的画面
+      if (params.has('live')) {
+        const op = params.get('live');
+        if (op === 'on' || op === 'off') {
+          const stub = devLive ?? (devLive = {
+            onAir: false,
+            shown: null as unknown,
+            calls: new Set<() => void>(),
+            attention(signal: AbortSignal) {
+              return new Promise<void>((resolve, reject) => {
+                const call = () => { this.calls.delete(call); resolve(); };
+                this.calls.add(call);
+                signal.addEventListener('abort', () => { this.calls.delete(call); reject(new Error('aborted')); }, { once: true });
+              });
+            },
+            showGame(source: unknown) { this.shown = source; console.info(`[dsh-game/dev] showGame ${JSON.stringify(source)}`); },
+          });
+          stub.onAir = op === 'on';
+          hooks.live = () => ctx.get?.('liveBody') ?? devLive ?? undefined;
+        }
+        if (op === 'call') for (const call of [...(devLive?.calls ?? [])]) call();
+        return new Response(JSON.stringify({ onAir: devLive?.onAir ?? false, shown: devLive?.shown ?? null }));
+      }
       // 狼人杀：下一局主人拿什么身份（wolf / seer / witch / hunter / villager，空是随机）
       if (params.has('ownerRole')) {
         const role = params.get('ownerRole') ?? '';

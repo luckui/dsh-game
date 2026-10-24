@@ -68,6 +68,9 @@ export interface Moment {
   actions?: GameActionSpec[];
 }
 
+/** 直播时游戏画面从哪来：网页地址，或者 OBS 窗口捕获的窗口（OBS 的「标题:窗口类:程序」）加上叠在上面的网页（HUD） */
+export type LiveSource = { url: string } | { window: string; overlay?: string };
+
 export interface GameSession {
   readonly id: string;
   readonly title: string;
@@ -79,6 +82,8 @@ export interface GameSession {
   setClientView?(mode: string): Promise<string>;
   /** 画面不在插件里时给主人看的说明（Minecraft：画面在摄像机客户端窗口里） */
   readonly screenNote?: string;
+  /** 直播时上舞台的游戏画面（没有画面可放时是 null） */
+  liveSource?(): LiveSource | null;
   /** 实时游戏（Minecraft）：世界不会停下来等她，她说话的同时身体就开始动 */
   readonly realtime?: boolean;
   /** 游戏背景和规则（事实），game_start 时交给 agent */

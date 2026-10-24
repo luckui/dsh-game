@@ -15,7 +15,7 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { randomUUID } from 'node:crypto';
-import { GAMES, MOODS, broadcast, formatMoment, games, hooks, record, saveRunAsset, settings, speak, withMic, type GameId, type Mood } from './runtime.js';
+import { GAMES, MOODS, broadcast, formatMoment, games, hooks, onAir, record, saveRunAsset, settings, speak, withMic, type GameId, type Mood } from './runtime.js';
 import { canSpeak, estimateSpeechMs, synthesize, type TtsAuth } from './tts.js';
 import { NARRATOR_VOICE } from './games/werewolf/characters.js';
 
@@ -215,6 +215,12 @@ async function speakLine(ctx: AgentContext, textToSay: unknown, moodArg: unknown
     record({ type: 'say', text: line, mood, voiced: false, start: now, end: now });
     return;
   }
+  // 在直播：她的话由直播插件念、上直播舞台，这里只记下来
+  if (onAir()) {
+    const now = Date.now();
+    record({ type: 'say', text: line, mood, voiced: false, start: now, end: now });
+    return;
+  }
   const auth = await ttsAuth(ctx);
   let audio: Uint8Array | null = null;
   if (auth) {
@@ -289,7 +295,15 @@ export function apply(ctx: AgentContext): void {
       // 实时游戏（Minecraft）：世界不等人，边念边等下一个时刻；别的游戏念完再继续
       const voicing = voiceOwnWords(ctx, exec, args.mood);
       if (!session.realtime) await voicing;
-      const moment = await session.wait(exec.signal, WAIT_MAX_MS);
+      // 在直播：直播间有事等她（弹幕、礼物、主人说话）就不等了，先交回给她；游戏停在原处（实时游戏照常进行）
+      const waiting = new AbortController();
+      const cancel = () => waiting.abort();
+      exec.signal.addEventListener('abort', cancel, { once: true });
+      let liveCalling = false;
+      onAir()?.attention(waiting.signal).then(() => { liveCalling = !waiting.signal.aborted; waiting.abort(); }, () => {});
+      const moment = await session.wait(waiting.signal, WAIT_MAX_MS);
+      exec.signal.removeEventListener('abort', cancel);
+      waiting.abort();
       await voicing;
       // 等的时候这局被关掉了（主人结束了这局，或者别的对话开了新局）
       if (games.session !== session) return { text: games.closed?.reason === 'owner' ? CLOSED_BY_OWNER : MOVED_AWAY, image: null };
@@ -298,7 +312,7 @@ export function apply(ctx: AgentContext): void {
       if (moment.image) {
         [image] = await ctx.attachments.saveImages([{ data: moment.image.data, mediaType: moment.image.mediaType, name: 'game-screen' }]);
       }
-      return { text: formatMoment(moment), image };
+      return { text: liveCalling ? `直播间有新消息。\n\n${formatMoment(moment)}` : formatMoment(moment), image };
     },
   })), 'game_continue tool');
 

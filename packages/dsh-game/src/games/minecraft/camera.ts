@@ -12,7 +12,8 @@ import os from 'node:os';
 import path from 'node:path';
 import type { MinecraftHudState } from './body/contracts.js';
 import { GameJar } from './gameJar.js';
-import { HudOverlay } from './hudOverlay.js';
+import { HudAssets, HudOverlay, hudPayload } from './hudOverlay.js';
+import { HudPage } from './hudPage.js';
 
 export interface CameraOptions {
   /** 装好游戏的 .minecraft（里面有 versions/<版本>/） */
@@ -26,6 +27,8 @@ export interface CameraOptions {
   gameDir: string;
   /** java（空 = 自动找） */
   java: string;
+  /** HUD 网页的端口（0 = 不开） */
+  hudPort: number;
   log?: (text: string) => void;
 }
 
@@ -104,7 +107,9 @@ function readDataVersion(jar: string): number | null {
 export class CameraClient {
   private pid: number | null = null;
   private closed = false;
+  private hudAssets: HudAssets | null = null;
   private hud: HudOverlay | null = null;
+  private hudPage: HudPage | null = null;
 
   constructor(private readonly options: CameraOptions) {}
 
@@ -124,8 +129,7 @@ export class CameraClient {
     launcher.on('close', (code: unknown) => {
       o.log?.(`[camera] client closed (${String(code)})`);
       this.pid = null;
-      this.hud?.stop();
-      this.hud = null;
+      this.stopHud();
     });
     const child = await launcher.launch({
       root: o.root,
@@ -146,18 +150,39 @@ export class CameraClient {
     o.log?.(`[camera] started pid ${this.pid}`);
     if (this.pid && process.platform === 'win32') {
       this.keepOutOfTheWay(this.pid);
+      const dir = path.join(o.gameDir, 'hud');
       try {
-        this.hud = new HudOverlay(path.join(o.root, 'versions', o.version, `${o.version}.jar`), path.join(o.gameDir, 'hud'), o.log);
+        this.hudAssets = new HudAssets(new GameJar(path.join(o.root, 'versions', o.version, `${o.version}.jar`)), dir);
+        this.hud = new HudOverlay(dir, o.log);
         this.hud.start(this.pid);
+        if (o.hudPort) {
+          this.hudPage = new HudPage(o.hudPort, dir, o.log);
+          this.hudPage.start();
+        }
       } catch (err) {
-        o.log?.(`[camera] no HUD overlay: ${(err as Error).message}`);
+        o.log?.(`[camera] no HUD: ${(err as Error).message}`);
       }
     }
   }
 
-  /** 摄像机窗口上的 HUD 画她现在的状态 */
+  /** HUD 画她现在的状态（摄像机窗口上的、HUD 网页上的） */
   showHud(state: MinecraftHudState): void {
-    this.hud?.update(state);
+    if (!this.hudAssets) return;
+    const text = hudPayload(this.hudAssets, state);
+    this.hud?.write(text);
+    this.hudPage?.push(text);
+  }
+
+  /** HUD 网页的地址（没开是 null） */
+  get hudUrl(): string | null {
+    return this.hudPage?.url ?? null;
+  }
+
+  /** OBS 窗口捕获认窗口用的「标题:窗口类:程序」（标题里的冒号 OBS 写成 #3A）；还不知道标题时是 null */
+  get obsWindow(): string | null {
+    const title = this.hud?.windowTitle;
+    if (!title) return null;
+    return `${title.replace(/:/g, '#3A')}:GLFW30:${path.basename(this.options.java || 'javaw.exe')}`;
   }
 
   /**
@@ -231,10 +256,17 @@ for ($i = 0; $i -lt ${times}; $i++) {
 
   stop(): void {
     this.closed = true;
-    this.hud?.stop();
-    this.hud = null;
+    this.stopHud();
     this.killPid(this.pid);
     this.pid = null;
+  }
+
+  private stopHud(): void {
+    this.hud?.stop();
+    this.hud = null;
+    this.hudPage?.stop();
+    this.hudPage = null;
+    this.hudAssets = null;
   }
 
   private killPid(pid: number | null): void {

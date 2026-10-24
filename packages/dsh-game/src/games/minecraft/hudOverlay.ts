@@ -31,11 +31,12 @@ const SPRITES = [
 
 const strip = (id: string) => id.replace(/^minecraft:/, '');
 
-/** 从游戏 jar 里取 HUD 要用的贴图，解析物品模型成图标 */
-class HudAssets {
+/** 从游戏 jar 里取 HUD 要用的贴图（解到 dir 下），解析物品模型成图标 */
+export class HudAssets {
   private readonly icons = new Map<string, HudIcon | null>();
 
   constructor(private readonly jar: GameJar, readonly dir: string) {
+    fs.mkdirSync(dir, { recursive: true });
     for (const id of SPRITES) this.texture(id);
   }
 
@@ -129,31 +130,49 @@ function findModel(node: any): { model: string; tints: unknown[] } | null {
   return null;
 }
 
+/** HUD 的状态：她现在的 HUD 加上用到的物品图标（桌面上的 HUD 窗口和 HUD 网页读的是同一份） */
+export function hudPayload(assets: HudAssets, hud: MinecraftHudState): string {
+  const icons: Record<string, HudIcon> = {};
+  for (const item of [...hud.hotbar, hud.offhand]) {
+    const icon = item && assets.icon(item.name);
+    if (icon) icons[item!.name] = icon;
+  }
+  return JSON.stringify({ hud, icons });
+}
+
 export class HudOverlay {
-  private readonly assets: HudAssets;
   private readonly stateFile: string;
   private pid: number | null = null;
   private last = '';
 
-  constructor(jarPath: string, dir: string, private readonly log?: (text: string) => void) {
-    fs.mkdirSync(dir, { recursive: true });
-    this.assets = new HudAssets(new GameJar(jarPath), dir);
+  constructor(private readonly dir: string, private readonly log?: (text: string) => void) {
     this.stateFile = path.join(dir, 'state.json');
+  }
+
+  /** 游戏窗口现在的标题（HUD 窗口看着游戏窗口，标题变了就写下来）；还不知道是空的 */
+  get windowTitle(): string {
+    try {
+      return fs.readFileSync(path.join(this.dir, 'window.txt'), 'utf8').trim();
+    } catch {
+      return '';
+    }
   }
 
   /** 开 HUD 窗口，贴着这个进程的游戏窗口 */
   start(gamePid: number): void {
     if (this.pid || process.platform !== 'win32') return;
-    const source = path.join(this.assets.dir, 'overlay.cs');
+    const source = path.join(this.dir, 'overlay.cs');
     fs.writeFileSync(source, OVERLAY_CS);
-    try { fs.rmSync(this.stateFile, { force: true }); } catch { /* 没有就算了 */ }
+    for (const file of [this.stateFile, path.join(this.dir, 'window.txt')]) {
+      try { fs.rmSync(file, { force: true }); } catch { /* 没有就算了 */ }
+    }
     this.last = '';
     const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
     const script = [
       // 不然编译时的进度条会以 CLIXML 的形式写进 stderr
       `$ProgressPreference = 'SilentlyContinue'`,
       `Add-Type -TypeDefinition ([IO.File]::ReadAllText(${q(source)})) -ReferencedAssemblies System.Drawing,System.Windows.Forms,System.Web.Extensions`,
-      `[DshHud]::Run(${gamePid}, ${q(this.assets.dir)}, ${q(this.stateFile)})`,
+      `[DshHud]::Run(${gamePid}, ${q(this.dir)}, ${q(this.stateFile)})`,
     ].join('\n');
     const encoded = Buffer.from(script, 'utf16le').toString('base64');
     const ps = spawn('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -165,16 +184,9 @@ export class HudOverlay {
     });
   }
 
-  /** 写她现在的 HUD（和上次一样就不写） */
-  update(hud: MinecraftHudState): void {
-    if (!this.pid) return;
-    const icons: Record<string, HudIcon> = {};
-    for (const item of [...hud.hotbar, hud.offhand]) {
-      const icon = item && this.assets.icon(item.name);
-      if (icon) icons[item!.name] = icon;
-    }
-    const text = JSON.stringify({ hud, icons });
-    if (text === this.last) return;
+  /** 写 HUD 的状态（和上次一样就不写） */
+  write(text: string): void {
+    if (!this.pid || text === this.last) return;
     this.last = text;
     try {
       fs.writeFileSync(this.stateFile, text);
@@ -241,6 +253,7 @@ public class DshHud : Form {
   readonly int[] glyphWidth = new int[256];
   bool dirty;
   int lastW, lastH, scale;
+  string lastTitle;
 
   public static void Run(int pid, string dir, string stateFile) {
     SetProcessDPIAware();
@@ -274,6 +287,11 @@ public class DshHud : Form {
     if (game.HasExited) { Close(); return; }
     if (gameWindow == IntPtr.Zero) gameWindow = game.MainWindowHandle;
     if (gameWindow == IntPtr.Zero) return;
+    // 游戏窗口的标题（直播时 OBS 按它找窗口）：变了就写下来
+    string title = game.MainWindowTitle;
+    if (title != lastTitle) {
+      try { File.WriteAllText(Path.Combine(dir, "window.txt"), title); lastTitle = title; } catch { }
+    }
     ReadState();
     if (hud == null || !IsWindowVisible(gameWindow) || IsIconic(gameWindow)) { if (Visible) Hide(); return; }
     RECT r; GetClientRect(gameWindow, out r);

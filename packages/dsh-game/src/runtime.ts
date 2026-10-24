@@ -15,7 +15,7 @@ import { NARRATOR_RATE, NARRATOR_VOICE } from './games/werewolf/characters.js';
 import type { WolfEntry, WolfState } from './games/werewolf/engine.js';
 import { WerewolfSession } from './games/werewolf/session.js';
 import { checkSetup, loadSetup, saveSetup, type ListModels, type WolfSetup } from './games/werewolf/setup.js';
-import type { GameSession, Moment, RunEvent } from './games/types.js';
+import type { GameSession, LiveSource, Moment, RunEvent } from './games/types.js';
 import { DEFAULT_VOICE } from './tts.js';
 
 export const MOODS = ['idle', 'talk', 'laugh', 'shocked', 'scared', 'sad', 'think', 'angry', 'shy', 'rice'] as const;
@@ -64,8 +64,10 @@ export interface Settings {
   mcJava: string;
   /** 摄像机在服务器里的名字 */
   mcCameraName: string;
+  /** 摄像机 HUD 网页（直播时 OBS 浏览器源叠在游戏画面上）的端口（0 = 不开） */
+  mcHudPort: number;
 }
-const DEFAULT_SETTINGS: Settings = { voice: DEFAULT_VOICE, censor: true, director: true, summaryModel: 'deepseek-official/deepseek-flash', ddlcDir: '', wolfModel: 'deepseek-official/deepseek-flash', wolfSeats: '', mcHost: '127.0.0.1', mcPort: 25565, mcUsername: 'DaFeiYu', mcRconPort: 25575, mcRconPassword: '', mcViewPort: 0, mcCamera: true, mcClientDir: '', mcJava: '', mcCameraName: 'DaFeiYuCam' };
+const DEFAULT_SETTINGS: Settings = { voice: DEFAULT_VOICE, censor: true, director: true, summaryModel: 'deepseek-official/deepseek-flash', ddlcDir: '', wolfModel: 'deepseek-official/deepseek-flash', wolfSeats: '', mcHost: '127.0.0.1', mcPort: 25565, mcUsername: 'DaFeiYu', mcRconPort: 25575, mcRconPassword: '', mcViewPort: 0, mcCamera: true, mcClientDir: '', mcJava: '', mcCameraName: 'DaFeiYuCam', mcHudPort: 7391 };
 
 /** 插件配置的读取方式：根插件 apply 时接上配置（插件页改了立刻生效，每次用时现读） */
 let readSettings: () => Partial<Settings> = () => ({});
@@ -138,7 +140,27 @@ export const hooks: {
   listModels?: ListModels;
   /** 狼人杀的角色和法官念得出来吗（配了新版控制台的 API Key） */
   tableVoiced?: () => Promise<boolean>;
+  /** 直播插件（dsh-livestream）提供的直播身体；没装、没开时是 undefined */
+  live?: () => LiveBody | undefined;
 } = {};
+
+/**
+ * 直播身体：dsh-livestream 提供的服务（约定见 dsh-livestream/docs/game-live-contract.md）。
+ * 在播时她的话由直播插件念、上直播舞台；游戏画面由直播插件放上舞台
+ */
+export interface LiveBody {
+  readonly onAir: boolean;
+  /** 直播间有事等她（弹幕、礼物、主人说话）时 resolve */
+  attention(signal: AbortSignal): Promise<void>;
+  /** 把游戏画面放上直播舞台 / 撤下 */
+  showGame(source: LiveSource | null): void;
+}
+
+/** 现在在直播吗（直播插件在、而且在播） */
+export const onAir = (): LiveBody | null => {
+  const live = hooks.live?.();
+  return live?.onAir ? live : null;
+};
 
 /** 狼人杀的开局设置：旧版插件设置只在第一次搬过来 */
 const legacyWolf = () => ({ model: settings.wolfModel, seats: settings.wolfSeats });
@@ -372,7 +394,7 @@ export const GAMES = {
       username: settings.mcUsername,
       viewPort: Number(settings.mcViewPort) || 0,
       camera: settings.mcCamera
-        ? { name: settings.mcCameraName, clientDir: settings.mcClientDir, java: settings.mcJava, gameDir: path.join(process.env.DSH_HOME ?? os.tmpdir(), 'dsh-game', 'mc-camera') }
+        ? { name: settings.mcCameraName, clientDir: settings.mcClientDir, java: settings.mcJava, hudPort: Number(settings.mcHudPort) || 0, gameDir: path.join(process.env.DSH_HOME ?? os.tmpdir(), 'dsh-game', 'mc-camera') }
         : null,
       log: (text) => console.log(text),
       onStateChange: () => announceGameState(),

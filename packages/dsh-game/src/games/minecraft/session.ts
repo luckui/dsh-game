@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { GameAction, GameActionSpec, GameSession, Moment, RunEvent } from '../types.js';
+import type { GameAction, GameActionSpec, GameSession, LiveSource, Moment, RunEvent } from '../types.js';
 import type { MinecraftActionResult, MinecraftEnvironmentSnapshot, MinecraftHudState, MinecraftObservedEntity } from './body/contracts.js';
 import type { MinecraftRuntimeEvent, MinecraftStatus } from './body/protocol.js';
 import { MinecraftRuntimeManager } from './body/runtimeManager.js';
@@ -29,7 +29,7 @@ export interface MinecraftOptions {
   /** 网页画面的端口（0 = 不开） */
   viewPort: number;
   /** 摄像机客户端（真的 Minecraft 客户端，旁观模式挂在她身上）；null = 不开。要有 RCON 才能把它切成旁观 */
-  camera?: { name: string; clientDir: string; java: string; gameDir: string } | null;
+  camera?: { name: string; clientDir: string; java: string; gameDir: string; hudPort: number } | null;
   log?: (text: string) => void;
   /** 给主人看的状态变了（摄像机开没开起来）：推一次游戏状态 */
   onStateChange?: () => void;
@@ -487,17 +487,25 @@ export class MinecraftSession implements GameSession {
     this.perspective = 'first';
     this.camera = new CameraClient({
       root, version, username: cam.name, host: this.options.host, port: this.options.port,
-      gameDir: cam.gameDir, java: findJava(cam.java, root), log: this.options.log,
+      gameDir: cam.gameDir, java: findJava(cam.java, root), hudPort: cam.hudPort, log: this.options.log,
     });
     this.cameraNote = `摄像机客户端（${cam.name}，Minecraft ${version}）正在打开，进服后会自动挂到她身上。`;
     try {
       await this.camera.start();
       this.hudTimer ??= setInterval(() => void this.pushHud(), HUD_MS);
-      this.cameraNote = `她的画面在摄像机客户端窗口里（${cam.name}，跟着她的视角）。直播时 OBS 抓这个窗口。`;
+      this.cameraNote = `她的画面在摄像机客户端窗口里（${cam.name}，跟着她的视角）。直播时 OBS 抓这个窗口${cam.hudPort ? `，血量、快捷栏这些用浏览器源 http://127.0.0.1:${cam.hudPort}/ 叠在上面（和窗口一样大）` : ''}。`;
     } catch (err) {
       this.camera = null;
       this.cameraNote = `摄像机客户端没开起来：${(err as Error).message}`;
     }
+  }
+
+  /** 直播时上舞台的画面：摄像机挂在她身上之后，OBS 抓摄像机窗口，HUD 网页叠在上面 */
+  liveSource(): LiveSource | null {
+    const window = this.camera?.running && this.cameraSeen ? this.camera.obsWindow : null;
+    if (!window) return null;
+    const overlay = this.camera!.hudUrl;
+    return overlay ? { window, overlay } : { window };
   }
 
   /** 摄像机挂在她身上时，窗口上的 HUD 画她的血、饱食度、快捷栏 */
