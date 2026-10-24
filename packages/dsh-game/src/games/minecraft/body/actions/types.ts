@@ -79,7 +79,9 @@ export interface MinecraftBodyAdapter {
   /** 自保：躲到地下 / 逃开怪物 / 睡觉过夜（见 survival.ts） */
   hide(signal: AbortSignal): Promise<MinecraftActionResult>;
   /** 开网页画面（见 viewer.ts） */
-  view(options: { port: number; firstPerson: boolean; viewDistance: number }): { url: string };
+  view(options: { port: number; viewDistance: number }): { url: string };
+  /** 画面角落的信息条（一行一件） */
+  hud(lines: string[]): void;
   /** 苦力怕反射：躲开附近的苦力怕（跑开约 8 格） */
   evadeCreeper(signal: AbortSignal): Promise<MinecraftActionResult>;
   flee(signal: AbortSignal): Promise<MinecraftActionResult>;

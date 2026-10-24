@@ -10,6 +10,7 @@ export type MinecraftAction =
   | 'task-release'
   | 'follow'
   | 'view'
+  | 'hud'
   | 'stop';
 
 export type {

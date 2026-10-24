@@ -119,6 +119,7 @@ export class MinecraftSession implements GameSession {
   private disconnected = false;
   private lastDimension: string | null = null;
   private lastRespectate = 0;
+  private lastHud = '';
   private unsubscribe: (() => void) | null = null;
   finished = false;
 
@@ -153,7 +154,7 @@ export class MinecraftSession implements GameSession {
     this.disconnected = false;
     if (this.options.viewPort) {
       try {
-        const view = await runtime.command<{ url: string }>('view', { port: this.options.viewPort, firstPerson: false, viewDistance: 6 }, 15_000);
+        const view = await runtime.command<{ url: string }>('view', { port: this.options.viewPort, viewDistance: 6 }, 15_000);
         this.viewUrl = view.url;
       } catch {
         this.viewUrl = null;
@@ -410,6 +411,7 @@ export class MinecraftSession implements GameSession {
     const moved = this.lastDimension !== null && dimension !== this.lastDimension;
     this.lastDimension = dimension;
     if (moved || Date.now() - this.lastRespectate >= RESPECTATE_MS) void this.attachSpectators();
+    void this.updateHud();
     // 新出现在 12 格内的敌对生物（同一只只报一次）
     for (const e of hostiles(s).filter((h) => h.distance <= 12)) {
       const key = `${e.name}@${Math.round(e.position.x / 4)},${Math.round(e.position.z / 4)}`;
@@ -429,6 +431,21 @@ export class MinecraftSession implements GameSession {
       this.spectators = new Set(status.spectators ?? []);
       if ([...this.spectators].some((p) => !before.has(p))) void this.attachSpectators();
     }
+  }
+
+  /** 画面角落的信息条：在做什么、血量和饥饿、目标（变了才发） */
+  private async updateHud(): Promise<void> {
+    if (!this.viewUrl || !this.runtime) return;
+    const b = this.snapshot?.body;
+    const lines = [
+      this.running ? `正在${this.running.label}${this.queue.length ? `（后面还有 ${this.queue.length} 件）` : ''}` : '空闲',
+      ...(b ? [`❤ ${fmt1(b.health)}/20　🍖 ${Math.round(b.food)}/20　${phaseOf(this.snapshot?.world?.timeOfDay) ?? ''}`] : []),
+      ...(this.goal ? [`目标：${this.goal}`] : []),
+    ];
+    const key = JSON.stringify(lines);
+    if (key === this.lastHud) return;
+    this.lastHud = key;
+    await this.runtime.command('hud', { lines }, 5000).catch(() => {});
   }
 
   /** 把旁观模式的玩家挂到她身上（第一人称跟着她；F5 换第三人称）。没配 RCON 就什么都不做 */

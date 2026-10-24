@@ -16,7 +16,7 @@ import {
 } from './craftPlanner.js';
 import { gatherWood } from './gatherWood.js';
 import { fleeFromHostiles, hideUnderground, sleepInBed } from './survival.js';
-import { closeView, openView, type ViewOptions } from './viewer.js';
+import { closeView, openView, setHud, type ViewOptions } from './viewer.js';
 import { placeBlockAt as airiPlaceBlockAt, breakBlockAt, isReplaceableForPlacement, type PlaceFace } from './placeBlock.js';
 import { Vec3 } from 'vec3';
 import { runAdaptiveCollection } from './collectionStrategy.js';
@@ -719,7 +719,7 @@ export function createMineflayerAdapter(
       if (bot !== current) return;
       stopGazeTracking();
       stopCreeperWatch();
-      closeView(current);
+      closeView();
       emit({
         kind: 'log',
         level: intentionalDisconnect ? 'info' : 'warn',
@@ -2366,6 +2366,10 @@ export function createMineflayerAdapter(
       viewOptions = options;
       openView(requireBot(bot), options);
       return { url: `http://127.0.0.1:${options.port}` };
+    },
+
+    hud(lines) {
+      setHud(lines);
     },
 
     async evadeCreeper(signal) {
