@@ -4,7 +4,7 @@
 
 ![游戏库和狼人杀的入座面板](docs/images/library.jpg)
 
-## 两款游戏
+## 三款游戏
 
 ### 狼人杀（插件自带）
 
@@ -23,6 +23,16 @@
 
 从 Steam 免费安装。大肥鱼从头玩到结局：起名字、做选项、写诗挑词，第三幕删角色文件也是她自己的决定。日常段落自动快进，关键剧情一场一场地看。
 
+### Minecraft（Java 版，生存）
+
+![方块世界里的大肥鱼](packages/dsh-game/assets/minecraft/cover.jpg)
+
+她自己进一个服务器玩：定目标、砍树、合成、挖矿、熔炼、打怪、天黑了躲起来或者睡觉。世界不会停下来等她，她说话的时候身体照样在干活，挨打会还手、苦力怕靠近会跑开、饿了会吃东西。
+
+- **摄像机客户端**：插件开一个真的 Minecraft 客户端，旁观挂在她身上，画面就是她的视角，一键切到背后、正面；窗口上叠着她的血量、饱食度和快捷栏。
+- **开局设置**：服务器、她的名字、摄像机都在游戏库里填，开局前逐项检查（服务器连没连上、客户端装没装、RCON 密码对不对……）。
+- **直播**：OBS 抓摄像机窗口，再叠一个浏览器源当 HUD。
+
 ## 她怎么玩
 
 - **画面就在 DSH 里**：游戏画面、她的思考过程（终端）、她的表情动画。
@@ -35,6 +45,7 @@
 - Windows，DSH `0.2.0-rc.2` 网页版，DSH 里已经配好 DeepSeek 模型。
 - Node.js 22+ 和 pnpm（从源码构建用）。
 - 玩《心跳文学部》：从 Steam 安装（免费）。
+- 玩 Minecraft：一个 Java 版、离线模式的服务器；要看她的画面，再装好同一个版本的客户端（HMCL 或官方启动器，不需要正版账号）并给服务器开 RCON。
 - 可选：豆包语音（火山引擎）的一个新版控制台 API Key，填进插件设置页就有声音。
 
 ## 安装
@@ -60,14 +71,17 @@ pnpm -C packages/dsh-game build
 
 ## 开发
 
-- `packages/dsh-game/`：插件本体。宿主端 `src/index.ts`、agent 工具 `src/agent.ts`、网页端 `src/client.tsx`；狼人杀在 `src/games/werewolf/`；《心跳文学部》用的 Ren'Py mod 在 `games/renpy/`。
+- `packages/dsh-game/`：插件本体。宿主端 `src/index.ts`、agent 工具 `src/agent.ts`、网页端 `src/client.tsx`；狼人杀在 `src/games/werewolf/`；Minecraft 在 `src/games/minecraft/`（身体是 mineflayer，在 `body/` 里，单独打包成子进程）；《心跳文学部》用的 Ren'Py mod 在 `games/renpy/`。
 - 改完代码：`pnpm -C packages/dsh-game build`，再重启 DSH（DSH 会把网页端产物缓存在内存里）。
 - `tools/restart-dsh.sh`：重启本地开发用的 DSH 网页版（DSH 装在 `.runtime/`，数据目录 `.dsh-home/`，便携 Node 在 `tools/node/`，都不进 git）。
 - `tools/ddlc-snapshot.sh`：测试前后保存和恢复《心跳文学部》的游戏状态。
+- `tools/mc-server.mjs`：本地开发用的 Minecraft 服务器（`start` / `stop` / `status` / `cmd <命令>`，服务器文件在 `.mc-server/`，不进 git）。
+- `tools/mc-selftest.mjs`：Minecraft 生存自测。一个测试玩家在空中的测试场地里把基本操作和各种边界情况走一遍，每一步核对结果、数量、报给她的背包变化和服务器里的真实背包（`basic` / `edge` / 不填 = 全部，大约 10 分钟）。改了身体就跑一遍。
 
 ## 许可与致谢
 
 - 代码：[MIT](LICENSE)。
 - 大肥鱼动画片段（`packages/dsh-game/assets/dafeiyu/`）：CC BY-NC-SA 4.0。形象来自社区创作，署名和来源见 [LICENSE.md](packages/dsh-game/assets/dafeiyu/LICENSE.md)。
 - 狼人杀美术（`packages/dsh-game/assets/werewolf/`）：AI 生成，CC BY-NC-SA 4.0，说明见 [README.md](packages/dsh-game/assets/werewolf/README.md)。
-- 本项目是非官方的粉丝作品，与 DeepSeek、Team Salvato 无关，不包含任何游戏文件。《心跳文学部》是心理恐怖游戏，有自残、自杀等内容，不适合未成年人。
+- Minecraft 美术（`packages/dsh-game/assets/minecraft/`）：AI 生成，CC BY-NC-SA 4.0，说明见 [README.md](packages/dsh-game/assets/minecraft/README.md)。
+- 本项目是非官方的粉丝作品，与 DeepSeek、Team Salvato、Mojang、Microsoft 无关，不包含任何游戏文件。Minecraft 是 Mojang Synergies AB 的商标。《心跳文学部》是心理恐怖游戏，有自残、自杀等内容，不适合未成年人。
