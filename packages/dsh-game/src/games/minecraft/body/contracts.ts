@@ -9,6 +9,8 @@ export type MinecraftFollowPhase =
 export type MinecraftActionName =
   | 'navigate_to_player'
   | 'go_to'
+  | 'hide'
+  | 'flee'
   | 'follow_player'
   | 'search_entity'
   | 'search_block'

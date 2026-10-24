@@ -60,6 +60,8 @@ export interface MinecraftStatus {
   host?: string;
   port?: number;
   players: string[];
+  /** 处于旁观模式的玩家（隐身、碰不到） */
+  spectators?: string[];
   owner?: string;
   health?: number;
   food?: number;

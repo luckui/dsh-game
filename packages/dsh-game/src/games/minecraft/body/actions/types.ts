@@ -74,6 +74,10 @@ export interface MinecraftBodyAdapter {
     signal?: AbortSignal;
   }): Promise<PathfindResult>;
   stopNavigation(): Promise<void>;
+  /** 自保：躲到地下 / 逃开怪物 / 睡觉过夜（见 survival.ts） */
+  hide(signal: AbortSignal): Promise<MinecraftActionResult>;
+  flee(signal: AbortSignal): Promise<MinecraftActionResult>;
+  sleep(signal: AbortSignal): Promise<MinecraftActionResult>;
   escapeToAir(): Promise<MinecraftSafetyRecovery>;
   inspect(options: { radius: number }): Promise<MinecraftEnvironmentSnapshot>;
   scanBlocks(options: { radius: number; verticalRadius: number; limit: number }): Promise<MinecraftActionResult>;

@@ -54,11 +54,14 @@ const ACTIONS: GameActionSpec[] = [
   { action: 'equip', description: '拿在手上，或者穿上盔甲', params: { name: '物品的英文 id' } },
   { action: 'drop', description: '把东西丢在地上（给别的玩家）', params: { name: '物品的英文 id', index: '数量（默认 1）' } },
   { action: 'pickup', description: '捡起附近地上的掉落物（后台做）' },
+  { action: 'hide', description: '原地往下挖两格钻进去、用一块方块（泥土、圆石、木板……）封住头顶，躲怪过夜；出来时 go 回原来的坐标（后台做）' },
+  { action: 'flee', description: '朝远离附近怪物的方向跑开十几格（后台做）' },
+  { action: 'sleep', description: '睡觉跳过夜晚：附近有床就去睡，没有就放下背包里的床（只有晚上、附近没怪时能睡）（后台做）' },
   { action: 'chat', description: '在游戏的聊天栏里打字（游戏里的玩家才看得到；你回复里写的话是说出口的，不会进游戏聊天）', params: { text: '要发的话' } },
   { action: 'stop', description: '停下正在做的事' },
 ];
 
-const LONG = new Set(['collect', 'craft', 'smelt', 'go', 'go_to_player', 'attack', 'pickup']);
+const LONG = new Set(['collect', 'craft', 'smelt', 'go', 'go_to_player', 'attack', 'pickup', 'hide', 'flee', 'sleep']);
 
 const ERROR_TEXT: Record<string, string> = {
   not_connected: '还没进游戏',
@@ -97,6 +100,7 @@ export class MinecraftSession implements GameSession {
   private queue: { bodyAction: string; args: Record<string, unknown>; label: string }[] = [];
   private goal = '';
   private players = new Set<string>();
+  private spectators = new Set<string>();
   private poller: NodeJS.Timeout | null = null;
   private lastHealth: number | null = null;
   private lastPhase: string | null = null;
@@ -236,6 +240,9 @@ export class MinecraftSession implements GameSession {
         case 'go': return ['go_to', { position: xyz, range: 1 }, `走到 ${fmtXyz(xyz!)}`];
         case 'go_to_player': return ['navigate_to_player', { player: action.name!.trim(), range: 2, timeoutMs: 120_000 }, `走到 ${action.name!.trim()} 身边`];
         case 'attack': return ['attack_entity', { entity: name, quantity: count, kill: true, radius: 32 }, `打 ${name} ×${count}`];
+        case 'hide': return ['hide', {}, '躲到地下'];
+        case 'flee': return ['flee', {}, '逃开怪物'];
+        case 'sleep': return ['sleep', {}, '睡觉'];
         default: return ['pickup_drops', { radius: 12 }, '捡附近的掉落物'];
       }
     })();
@@ -257,7 +264,14 @@ export class MinecraftSession implements GameSession {
     this.options.onAction?.(label);
     this.options.record({ type: 'act', text: label });
     void runtime.command<MinecraftActionResult>('execute-action', { id, name: bodyAction, args }, 0)
-      .then((r) => this.finishRunning(running, r))
+      .then(async (r) => {
+        // 矿石、石头这类：挖下来掉的是别的东西（iron_ore 掉 raw_iron），按「物品」找不到来源 → 按方块再来一次
+        if (bodyAction === 'collect_item' && r.outcome === 'failed' && /cannot resolve source blocks/.test(String(r.error?.details?.message ?? r.summary)) && this.running === running) {
+          const blockArgs = { block: args.item, quantity: args.quantity, maxCount: args.quantity, radius: args.radius };
+          r = await runtime.command<MinecraftActionResult>('execute-action', { id, name: 'collect_item', args: blockArgs }, 0);
+        }
+        this.finishRunning(running, r);
+      })
       .catch((err) => this.finishRunning(running, null, (err as Error).message));
   }
 
@@ -324,7 +338,7 @@ export class MinecraftSession implements GameSession {
         break;
       }
       case 'death':
-        this.running = null;
+        // 正在做的事由身体自己报（死的时候它会停掉并回报），这里不清，免得两边对不上
         this.queue = [];
         this.push(`你死了${event.position ? `（在 ${fmtXyz(event.position)}）` : ''}。会在出生点复活，身上的东西掉在死的地方，几分钟内回去还能捡。`, true);
         break;
@@ -382,6 +396,13 @@ export class MinecraftSession implements GameSession {
   private async refresh(): Promise<void> {
     if (!this.runtime || this.disconnected) return;
     this.snapshot = await this.runtime.command<MinecraftEnvironmentSnapshot>('snapshot', {}, 10_000);
+    const status = await this.runtime.command<MinecraftStatus>('status', {}, 10_000).catch(() => null);
+    if (status) this.spectators = new Set(status.spectators ?? []);
+  }
+
+  /** 在线的其他玩家（旁观模式的标出来：隐身、碰不到，也走不到他身边） */
+  private others(): string[] {
+    return [...this.players].map((p) => (this.spectators.has(p) ? `${p}（旁观模式：隐身，碰不到，也走不到他身边）` : p));
   }
 
   // ───────────────────────── 时刻 ─────────────────────────
@@ -423,7 +444,7 @@ export class MinecraftSession implements GameSession {
       reason,
       where: this.whereText(),
       lines,
-      onStage: [...this.players],
+      onStage: this.others(),
       notes,
       ...(this.firstMoment ? { actions: ACTIONS } : {}),
     };
@@ -445,7 +466,7 @@ export class MinecraftSession implements GameSession {
     const s = this.snapshot;
     const parts = [`${head}。现在：${this.whereText()}。`];
     if (s?.body) parts.push(`背包：${formatInventory(s.body.inventory)}。`);
-    const others = [...this.players];
+    const others = this.others();
     parts.push(others.length ? `在线的其他玩家：${others.join('、')}。` : '服务器里现在只有你。');
     return parts.join('\n');
   }

@@ -15,6 +15,7 @@ import {
   type CraftPlanStep,
 } from './craftPlanner.js';
 import { gatherWood } from './gatherWood.js';
+import { fleeFromHostiles, hideUnderground, sleepInBed } from './survival.js';
 import { placeBlockAt as airiPlaceBlockAt, breakBlockAt, isReplaceableForPlacement, type PlaceFace } from './placeBlock.js';
 import { Vec3 } from 'vec3';
 import { runAdaptiveCollection } from './collectionStrategy.js';
@@ -2259,6 +2260,7 @@ export function createMineflayerAdapter(
         host: connection?.host,
         port: connection?.port,
         players: bot ? humanPlayerNames(bot) : [],
+        spectators: bot ? Object.values(bot.players as Record<string, { username: string; gamemode?: number }>).filter((p) => p.gamemode === 3).map((p) => p.username) : [],
         owner,
         health: bot?.health,
         food: bot?.food,
@@ -2321,6 +2323,18 @@ export function createMineflayerAdapter(
           }),
         },
       );
+    },
+
+    hide(signal) {
+      return hideUnderground(requireBot(bot), signal);
+    },
+
+    flee(signal) {
+      return fleeFromHostiles(requireBot(bot), signal);
+    },
+
+    sleep(signal) {
+      return sleepInBed(requireBot(bot), signal);
     },
 
     async stopNavigation() {
