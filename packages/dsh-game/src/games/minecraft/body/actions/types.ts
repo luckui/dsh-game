@@ -58,7 +58,7 @@ export interface MinecraftFollowBlocked {
 export interface MinecraftSafetyRecovery {
   recovered: boolean;
   oxygen: number;
-  method: 'surface' | 'last-breathable-position' | 'failed';
+  method: 'surface' | 'last-breathable-position' | 'shore' | 'failed';
 }
 
 export interface MinecraftBodyAdapter {
@@ -87,6 +87,8 @@ export interface MinecraftBodyAdapter {
   flee(signal: AbortSignal): Promise<MinecraftActionResult>;
   sleep(signal: AbortSignal): Promise<MinecraftActionResult>;
   escapeToAir(): Promise<MinecraftSafetyRecovery>;
+  /** 浮上来之后游到最近的岸上（寻路器在水里规划不好，手动划水）；到了岸上返回 true */
+  swimToShore(): Promise<boolean>;
   inspect(options: { radius: number }): Promise<MinecraftEnvironmentSnapshot>;
   scanBlocks(options: { radius: number; verticalRadius: number; limit: number }): Promise<MinecraftActionResult>;
   searchBlock(options: { block: string; radius: number; count: number }): Promise<MinecraftActionResult>;

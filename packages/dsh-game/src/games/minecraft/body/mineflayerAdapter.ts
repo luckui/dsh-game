@@ -15,7 +15,7 @@ import {
   type CraftPlanStep,
 } from './craftPlanner.js';
 import { gatherWood } from './gatherWood.js';
-import { fleeFromHostiles, hideUnderground, sleepInBed } from './survival.js';
+import { fleeFromHostiles, hideUnderground, sleepInBed, swimToShore } from './survival.js';
 import { closeView, openView, setHud, type ViewOptions } from './viewer.js';
 import { placeBlockAt as airiPlaceBlockAt, breakBlockAt, isReplaceableForPlacement, type PlaceFace } from './placeBlock.js';
 import { Vec3 } from 'vec3';
@@ -2360,6 +2360,10 @@ export function createMineflayerAdapter(
 
     hide(signal) {
       return hideUnderground(requireBot(bot), signal);
+    },
+
+    swimToShore() {
+      return swimToShore(requireBot(bot));
     },
 
     view(options) {

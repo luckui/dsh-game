@@ -161,3 +161,50 @@ export async function sleepInBed(bot: any, signal: AbortSignal): Promise<Minecra
     placed ? { [placed]: -1 } : {},
   );
 }
+
+const WATER = new Set(['water', 'flowing_water', 'bubble_column', 'seagrass', 'tall_seagrass', 'kelp', 'kelp_plant']);
+
+/** 在水里：找最近的能站的岸（实心方块，上面两格是空气），对着它游过去爬上去。寻路器在水里规划不好，这里手动划水 */
+export async function swimToShore(bot: any, signal?: AbortSignal, timeoutMs = 12_000): Promise<boolean> {
+  const inWater = () => {
+    const p = bot.entity?.position;
+    if (!p) return false;
+    const feet = bot.blockAt(p.floored());
+    const head = bot.blockAt(p.offset(0, 1, 0).floored());
+    return WATER.has(feet?.name) || WATER.has(head?.name) || bot.entity.isInWater;
+  };
+  if (!inWater()) return true;
+  const me: Vec3 = bot.entity.position.floored();
+  let best: { target: Vec3; score: number } | null = null;
+  for (let dx = -6; dx <= 6; dx++) {
+    for (let dz = -6; dz <= 6; dz++) {
+      for (let dy = -2; dy <= 3; dy++) {
+        const ground = bot.blockAt(me.offset(dx, dy, dz));
+        if (!ground || ground.boundingBox !== 'block' || WATER.has(ground.name) || LIQUID.has(ground.name)) continue;
+        const a1 = bot.blockAt(me.offset(dx, dy + 1, dz));
+        const a2 = bot.blockAt(me.offset(dx, dy + 2, dz));
+        if (!a1 || !a2 || !EMPTY.has(a1.name) || !EMPTY.has(a2.name)) continue;
+        const score = Math.hypot(dx, dz) + Math.max(0, dy) * 1.5;
+        if (!best || score < best.score) best = { target: me.offset(dx, dy + 1, dz), score };
+      }
+    }
+  }
+  if (!best) return false;
+  const target = best.target.offset(0.5, 0, 0.5);
+  const end = Date.now() + timeoutMs;
+  try {
+    while (Date.now() < end && !signal?.aborted) {
+      const p = bot.entity.position;
+      const flat = Math.hypot(target.x - p.x, target.z - p.z);
+      if (!inWater() && bot.entity.onGround) return true;
+      await bot.lookAt(target.offset(0, 1.2, 0), true);
+      bot.setControlState('forward', flat > 0.3);
+      bot.setControlState('jump', true);
+      bot.setControlState('sprint', false);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  } finally {
+    bot.clearControlStates?.();
+  }
+  return !inWater();
+}

@@ -395,6 +395,14 @@ export function createRuntimeWorkerController(
         message: `[survival] oxygen recovery threw: ${error instanceof Error ? error.message : String(error)}`,
       });
     }
+    // 只浮上来不够：一松手又沉下去，空气又耗光。接着游到岸上
+    try {
+      const ashore = await adapter.swimToShore();
+      emit({ kind: 'log', level: ashore ? 'info' : 'warn', message: `[survival] swim to shore ${ashore ? 'reached land' : 'found no reachable shore'}` });
+      if (ashore) recovery = { ...recovery, recovered: true, method: recovery.recovered ? recovery.method : 'shore' };
+    } catch (error) {
+      emit({ kind: 'log', level: 'warn', message: `[survival] swim to shore threw: ${error instanceof Error ? error.message : String(error)}` });
+    }
     emit({
       kind: 'log',
       level: recovery.recovered ? 'info' : 'error',
