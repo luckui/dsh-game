@@ -20,6 +20,7 @@ import { buildStructure } from './build.js';
 import { breedAnimals, farmPlot, harvestCrops, shearSheep } from './farming.js';
 import { digAt as digOne, useBucket, useOnBlock } from './useItems.js';
 import { flyTo, openSkySpots } from './flight.js';
+import { scanTerrain } from './terrain.js';
 import { placeBlockAt as airiPlaceBlockAt, breakBlockAt, isInteractive, isReplaceableForPlacement, type PlaceFace } from './placeBlock.js';
 import { Vec3 } from 'vec3';
 import { runAdaptiveCollection } from './collectionStrategy.js';
@@ -2488,6 +2489,10 @@ export function createMineflayerAdapter(
       return swimToShore(requireBot(bot));
     },
 
+    terrain(radius) {
+      return scanTerrain(requireBot(bot), Math.max(8, Math.min(64, Math.round(radius))));
+    },
+
     checkBlocks(names) {
       const current = requireBot(bot);
       const out: Record<string, string> = {};
@@ -3060,6 +3065,7 @@ function bodySnapshot(bot: any): MinecraftRawObservation['body'] {
     health: bot.health ?? 0,
     food: bot.food ?? 0,
     oxygen: typeof bot.oxygenLevel === 'number' ? bot.oxygenLevel : undefined,
+    inWater: !!bot.entity?.isInWater,
     inventory: inventoryCounts(bot),
   };
 }

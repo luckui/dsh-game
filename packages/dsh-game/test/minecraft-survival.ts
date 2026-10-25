@@ -832,6 +832,17 @@ async function creativeCases(): Promise<void> {
   const ghosts2 = Number((await rcon('execute if entity @e[type=block_display,tag=dsh_ghost]')).match(/count:\s*(\d+)/i)?.[1] ?? 0);
   check(ghosts2 === 0, `停下以后虚影撤了（还剩 ${ghosts2}）`);
 
+  begin('look：周围地形的俯视图（海边的真实地形）');
+  await rcon(`tp ${NAME} 1025 75 1045`);
+  await sleep(4000);
+  const looked = await session.act({ action: 'look' });
+  const map = (session as any).takeImage();
+  note(looked.replace(/\n/g, ' | ').slice(0, 400));
+  if (map) fs.writeFileSync(path.join(ROOT, 'packages', 'dsh-game', 'test', '.out', 'look.png'), map.data);
+  check(!!map && map.data[0] === 0x89 && /水占 \d+%/.test(looked) && /俯视图/.test(looked), '给了俯视图和文字（水占多少、平地）');
+  await rcon(`tp ${NAME} ${X} ${Y + 1} ${Z}`);
+  await sleep(1500);
+
   begin('创造模式：日志记下了盖好的建筑');
   const book = await session.act({ action: 'journal' });
   check(/「穹顶塔」在 \(1060, 201, 1000\)，盖完了/.test(book), '穹顶塔记进了日志');

@@ -1,3 +1,4 @@
+import type { TerrainScan } from '../terrain.js';
 import type {
   MinecraftActionInstruction,
   MinecraftActionName,
@@ -84,6 +85,8 @@ export interface MinecraftBodyAdapter {
   hudState(): MinecraftHudState | null;
   /** 这些名字里哪些不是这个版本能放的方块：名字 → 说明（附相近的名字） */
   checkBlocks(names: string[]): Record<string, string>;
+  /** 周围的地形（每一列的地面高度和方块，见 terrain.ts） */
+  terrain(radius: number): TerrainScan;
   /** 照图纸盖房子（见 build.ts） */
   buildStructure(options: { label: string; blocks: BuildBlock[]; clear: { x: number; y: number; z: number }[]; signal: AbortSignal }): Promise<MinecraftActionResult>;
   /** 种地、收庄稼、繁殖、剪羊毛（见 farming.ts） */

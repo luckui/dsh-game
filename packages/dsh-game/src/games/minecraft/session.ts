@@ -22,6 +22,8 @@ import { GhostBuild } from './ghost.js';
 import { isShapeText, parseShapes } from './shapes.js';
 import { placeLayers, worldBase } from './creative.js';
 import { BlockColors, VIEW_LABELS, renderBlueprint } from './preview.js';
+import { describeTerrain, findFlatSpots, renderTerrain } from './terrainMap.js';
+import type { TerrainScan } from './body/terrain.js';
 import { GameJar } from './gameJar.js';
 import { WorldJournal, dimensionName } from './journal.js';
 
@@ -89,6 +91,7 @@ const ACTIONS: GameActionSpec[] = [
   { action: 'follow', description: '一直跟着一个玩家走，直到你做别的事或 stop', params: { name: '玩家名' } },
   { action: 'attack', description: '去打附近的生物（后台做）', params: { name: '生物的英文 id，比如 zombie、cow', index: '打几只（默认 1）' } },
   { action: 'place', description: '在一个坐标放一个方块', params: { name: '方块的英文 id', text: '坐标「x y z」' } },
+  { action: 'look', description: '看看周围的地形：一张以你为中心 65×65 格的俯视图（地面方块的颜色，水是蓝的，越亮越高），加上水占多少、地面多高、附近哪里有平地（中心坐标、大小）。找地方盖房子、找路之前先看一眼' },
   { action: 'find', description: '找附近的某种方块或生物在哪（马上返回位置）', params: { name: '方块或生物的英文 id' } },
   { action: 'equip', description: '拿在手上，或者穿上盔甲', params: { name: '物品的英文 id' } },
   { action: 'drop', description: '把东西丢在地上（给别的玩家）', params: { name: '物品的英文 id', index: '数量（默认 1）' } },
@@ -342,6 +345,13 @@ export class MinecraftSession implements GameSession {
           unknown.length ? '' : `存好了，可以 build ${title}。${enough}${parsed.blueprint.offset ? `用 view 看切片（共 ${parsed.blueprint.height} 层）。` : ''}${picture}`,
         ].filter(Boolean).join('\n');
       }
+      case 'look': {
+        const scan = await runtime.command<TerrainScan>('terrain', { radius: 32 }, 20_000);
+        const spots = findFlatSpots(scan);
+        this.loadColors();
+        this.image = { data: renderTerrain(scan, this.colors ?? null, spots), mediaType: 'image/png' };
+        return describeTerrain(scan, spots);
+      }
       case 'view': {
         const bp = this.designs.get(action.name!.trim())!;
         const k = Math.max(1, Math.min(bp.height, Math.round(action.index ?? 1)));
@@ -503,6 +513,19 @@ export class MinecraftSession implements GameSession {
 
   /** 画一张图纸的渲染图，等 game_act 取走；画不了（没装客户端）返回 false */
   private preview(bp: Blueprint): boolean {
+    this.loadColors();
+    if (!this.colors) return false;
+    try {
+      this.image = { data: renderBlueprint(bp, this.colors), mediaType: 'image/png' };
+      return true;
+    } catch (err) {
+      this.options.log?.(`[preview] could not render: ${(err as Error).message}`);
+      return false;
+    }
+  }
+
+  /** 方块颜色（游戏 jar 里的贴图）：第一次用到时读 */
+  private loadColors(): void {
     if (this.colors === undefined) {
       const version = this.status?.version ?? '';
       const root = version ? findMinecraftRoot(this.options.clientDir ?? this.options.camera?.clientDir ?? '', version) : null;
@@ -512,14 +535,6 @@ export class MinecraftSession implements GameSession {
         this.options.log?.(`[preview] could not open the game jar: ${(err as Error).message}`);
         this.colors = null;
       }
-    }
-    if (!this.colors) return false;
-    try {
-      this.image = { data: renderBlueprint(bp, this.colors), mediaType: 'image/png' };
-      return true;
-    } catch (err) {
-      this.options.log?.(`[preview] could not render: ${(err as Error).message}`);
-      return false;
     }
   }
 
@@ -959,6 +974,7 @@ export class MinecraftSession implements GameSession {
     }
     if (this.queue.length) notes.push(`排着队：${this.queue.map((q) => q.label).join(' → ')}`);
     if (s?.body) notes.push(`背包：${formatInventory(s.body.inventory)}`);
+    if (s?.body?.inWater) notes.push('你泡在水里（look 看看周围哪里是陆地）。');
     const near = (s?.nearby.entities ?? []).filter((e) => e.distance <= 24).slice(0, 8).map(fmtEntity);
     if (near.length) notes.push(`附近 24 格内：${near.join('、')}`);
     const moment: Moment = {

@@ -11,6 +11,7 @@ export type MinecraftAction =
   | 'follow'
   | 'hud-state'
   | 'check-blocks'
+  | 'terrain'
   | 'stop';
 
 export type {

@@ -94,6 +94,8 @@ export interface MinecraftEnvironmentSnapshot {
     health: number;
     food: number;
     oxygen?: number;
+    /** 身体泡在水里 */
+    inWater?: boolean;
     inventory: Record<string, number>;
   };
   owner?: { name: string; visible: boolean; distance?: number; relativeDirection?: string };

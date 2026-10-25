@@ -28,6 +28,7 @@ export interface WorkerController {
   follow(payload: any): Promise<unknown>;
   hudState(): unknown;
   checkBlocks(payload: any): unknown;
+  terrain(payload: any): unknown;
   stop(): Promise<unknown>;
   taskRelease(): Promise<unknown>;
 }
@@ -90,6 +91,8 @@ async function runCommand(
       return controller.hudState();
     case 'check-blocks':
       return controller.checkBlocks(command.payload);
+    case 'terrain':
+      return controller.terrain(command.payload);
     case 'stop':
       return controller.stop();
     case 'task-release':
@@ -536,6 +539,9 @@ export function createRuntimeWorkerController(
     },
     hudState() {
       return adapter.hudState();
+    },
+    terrain(payload: { radius?: number }) {
+      return adapter.terrain(payload.radius ?? 32);
     },
     checkBlocks(payload: { names: string[] }) {
       return adapter.checkBlocks(payload.names ?? []);
