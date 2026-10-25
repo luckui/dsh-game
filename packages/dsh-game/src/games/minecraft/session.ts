@@ -180,6 +180,9 @@ export class MinecraftSession implements GameSession {
   private colors: BlockColors | null | undefined;
   /** 刚做完的那件事附带的图（game_act 取走） */
   private image: { data: Uint8Array; mediaType: 'image/png' } | null = null;
+  /** 她这局看过的图（主人在游戏页上翻看），最多留 30 张 */
+  private pictures: { id: number; label: string; at: number; data: Uint8Array }[] = [];
+  private pictureSeq = 0;
   private journal: WorldJournal | null = null;
   private lastJournalSave = 0;
   private lastDeathAt = 0;
@@ -350,7 +353,7 @@ export class MinecraftSession implements GameSession {
         const have = this.snapshot?.body?.inventory ?? {};
         const short = Object.entries(materials(parsed.blueprint)).filter(([n, c]) => (have[n] ?? 0) < c).map(([n, c]) => `${n} 还差 ${c - (have[n] ?? 0)}`);
         const enough = this.options.creative ? '创造模式不用材料。' : short.length ? `照现在的背包，材料${short.join('，')}。` : '材料够了。';
-        const picture = unknown.length ? '' : this.preview(parsed.blueprint) ? `附了一张渲染图（${VIEW_LABELS}；四个角各看一眼）。` : '';
+        const picture = unknown.length ? '' : this.preview(parsed.blueprint, `图纸「${title}」`) ? `附了一张渲染图（${VIEW_LABELS}；四个角各看一眼）。` : '';
         return [
           action.action === 'template' ? `参考图纸 ${title}：${TEMPLATES[title].title}\n${text}\n` : '',
           preview,
@@ -367,13 +370,14 @@ export class MinecraftSession implements GameSession {
         const spots = findFlatSpots(scan);
         this.loadColors();
         this.image = { data: renderTerrain(scan, this.colors ?? null, spots), mediaType: 'image/png' };
+        this.remember(`周围的地形（${fmtXyz(scan.me)}）`, this.image.data);
         return describeTerrain(scan, spots);
       }
       case 'view': {
         const bp = this.designs.get(action.name!.trim())!;
         const k = Math.max(1, Math.min(bp.height, Math.round(action.index ?? 1)));
         // 切开图：只画到这一层（上面的都拿掉），看得到这一层以里的样子
-        const cut = this.preview({ ...bp, layers: bp.layers.slice(0, k), height: k });
+        const cut = this.preview({ ...bp, layers: bp.layers.slice(0, k), height: k }, `图纸「${action.name!.trim()}」切到第 ${k} 层`);
         return `图纸「${action.name!.trim()}」${layerSlice(bp, k)}${cut ? `\n附了一张切开图：只画到第 ${k} 层，上面的都拿掉了（${VIEW_LABELS}）。` : ''}`;
       }
       case 'mark': {
@@ -588,11 +592,12 @@ export class MinecraftSession implements GameSession {
   }
 
   /** 画一张图纸的渲染图，等 game_act 取走；画不了（没装客户端）返回 false */
-  private preview(bp: Blueprint): boolean {
+  private preview(bp: Blueprint, label: string): boolean {
     this.loadColors();
     if (!this.colors) return false;
     try {
       this.image = { data: renderBlueprint(bp, this.colors), mediaType: 'image/png' };
+      this.remember(label, this.image.data);
       return true;
     } catch (err) {
       this.options.log?.(`[preview] could not render: ${(err as Error).message}`);
@@ -612,6 +617,20 @@ export class MinecraftSession implements GameSession {
         this.colors = null;
       }
     }
+  }
+
+  private remember(label: string, data: Uint8Array): void {
+    this.pictures.push({ id: ++this.pictureSeq, label, at: Date.now(), data });
+    if (this.pictures.length > 30) this.pictures.shift();
+  }
+
+  gallery(): { id: number; label: string; at: number }[] {
+    return this.pictures.map(({ id, label, at }) => ({ id, label, at }));
+  }
+
+  galleryImage(id: number): { data: Uint8Array; mediaType: 'image/png' } | null {
+    const p = this.pictures.find((x) => x.id === id);
+    return p ? { data: p.data, mediaType: 'image/png' } : null;
   }
 
   takeImage(): { data: Uint8Array; mediaType: 'image/png' } | null {

@@ -313,6 +313,15 @@ export function apply(ctx: HostContext, config: LiveConfig = {}): void {
   }, 'dsh-game close');
 
   // 这局游戏现在的状态（页面打开时要一次，之后跟着 game-state 事件）
+  // 她这局看过的图（Minecraft 图纸的渲染图、地形图）：列表、单张
+  route('/api/dsh-game/gallery', ['GET'], () => new Response(JSON.stringify(games.session?.gallery?.() ?? []), { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } }), 'dsh-game gallery');
+  route('/api/dsh-game/gallery-image', ['GET'], (request) => {
+    const id = Number(new URL(request.url).searchParams.get('id'));
+    const image = games.session?.galleryImage?.(id);
+    if (!image) return new Response('not found', { status: 404 });
+    return new Response(Buffer.from(image.data), { headers: { 'content-type': image.mediaType, 'cache-control': 'private, max-age=3600' } });
+  }, 'dsh-game gallery image');
+
   route('/api/dsh-game/state', ['GET'], () => new Response(JSON.stringify(games.state()), { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } }), 'dsh-game state');
 
   // 切换游戏客户端的视角（Minecraft 摄像机：first / back / front）

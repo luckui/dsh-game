@@ -93,6 +93,9 @@ export interface GameSession {
   act(action: GameAction): Promise<string>;
   /** 刚做完的那件事附带的图（Minecraft 图纸的渲染图）：取一次就没了 */
   takeImage?(): { data: Uint8Array; mediaType: 'image/png' | 'image/jpeg' } | null;
+  /** 她这局看过的图（渲染图、切开图、地形图），给主人在游戏页上翻看：最新的在后面 */
+  gallery?(): { id: number; label: string; at: number }[];
+  galleryImage?(id: number): { data: Uint8Array; mediaType: 'image/png' | 'image/jpeg' } | null;
   /** 画面推流帧率（0 = 不推）。有画面推流的游戏才实现 */
   setStream?(fps: number): void;
   /** 主人在她玩的时候插话了：正在等的时刻提前交给她，让她马上看到 */

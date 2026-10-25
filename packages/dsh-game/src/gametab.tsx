@@ -269,8 +269,26 @@ function GameScreen({ onLive }: { onLive: (live: boolean) => void }) {
   );
 }
 
-/** 画面在游戏客户端窗口里（Minecraft 摄像机）：说明 + 视角切换（往那个窗口发 F5，不用碰它） */
+/** 她这局看过的图（每 3 秒问一次有没有新的） */
+function useGallery(): { id: number; label: string; at: number }[] {
+  const [items, setItems] = useState<{ id: number; label: string; at: number }[]>([]);
+  useEffect(() => {
+    let alive = true;
+    const load = () => fetch('/api/dsh-game/gallery', { cache: 'no-store' }).then((r) => r.json()).then((list) => { if (alive && Array.isArray(list)) setItems(list); }).catch(() => {});
+    void load();
+    const timer = setInterval(load, 3000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
+  return items;
+}
+
+/**
+ * 画面在游戏客户端窗口里（Minecraft 摄像机）：说明 + 视角切换（往那个窗口发 F5，不用碰它）。
+ * 她看过图（图纸的渲染图、切开图、地形图）时，这块地方显示她最新看到的那张，下面一排是前几张，点了看那张（点最新的回到跟着最新）
+ */
 function ClientScreen({ title, note, perspective }: { title: string; note: string; perspective: string | null }) {
+  const gallery = useGallery();
+  const [picked, setPicked] = useState<number | null>(null);
   const [error, setError] = useState('');
   const pick = async (mode: string) => {
     setError('');
@@ -278,17 +296,40 @@ function ClientScreen({ title, note, perspective }: { title: string; note: strin
     if (!res?.ok) setError((await res?.text().catch(() => '')) || '切换失败');
   };
   const views: [string, string][] = [['first', '她的视角'], ['back', '背后'], ['front', '正面']];
+  const viewButtons = perspective && (
+    <div className="dg-client-views">
+      {views.map(([mode, label]) => (
+        <button key={mode} className={`dg-stop dg-tool${perspective === mode ? ' on' : ''}`} onClick={() => void pick(mode)}>{label}</button>
+      ))}
+    </div>
+  );
+  const latest = gallery[gallery.length - 1];
+  const shown = gallery.find((g) => g.id === picked) ?? latest;
+  if (shown) {
+    return (
+      <div className="dg-screen dg-screen-gallery">
+        <div className="dg-gallery-top" title={note}>
+          <span><b>{shown.label}</b>{shown !== latest ? ' · 前几张' : ' · 她刚看到的'}</span>
+          <span className="dg-gallery-hint">游戏画面在客户端窗口里</span>
+          {viewButtons}
+        </div>
+        <img className="dg-gallery-main" src={`/api/dsh-game/gallery-image?id=${shown.id}&t=${shown.at}`} alt={shown.label} />
+        <div className="dg-gallery-strip">
+          {gallery.slice(-12).map((g) => (
+            <button key={g.id} className={g.id === shown.id ? 'on' : ''} title={g.label} onClick={() => setPicked(g.id === latest.id ? null : g.id)}>
+              <img src={`/api/dsh-game/gallery-image?id=${g.id}&t=${g.at}`} alt={g.label} />
+            </button>
+          ))}
+        </div>
+        {error && <p className="dg-client-error">{error}</p>}
+      </div>
+    );
+  }
   return (
     <div className="dg-screen dg-screen-note">
       <b>{`${title}的画面在游戏客户端窗口里`}</b>
       <p>{note}</p>
-      {perspective && (
-        <div className="dg-client-views">
-          {views.map(([mode, label]) => (
-            <button key={mode} className={`dg-stop dg-tool${perspective === mode ? ' on' : ''}`} onClick={() => void pick(mode)}>{label}</button>
-          ))}
-        </div>
-      )}
+      {viewButtons}
       {error && <p className="dg-client-error">{error}</p>}
     </div>
   );
@@ -479,6 +520,19 @@ html[data-dsh-game-view][data-dsh-game-theater] header:has([data-conversation-ta
 .dg-live[data-status=finished]{color:#c9d4f0}
 .dg-live[data-status=elsewhere]{color:#9fb6ec}
 .dg-stop[data-confirm]{color:#ffc2cb;border-color:rgba(255,150,170,.6);box-shadow:0 0 14px -5px rgba(255,140,165,.7)}
+.dg-screen-gallery{position:relative;background:#dfe4ec}
+.dg-screen .dg-gallery-main{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+.dg-gallery-top{position:absolute;left:0;right:0;top:0;display:flex;align-items:center;gap:10px;padding:6px 10px;font-size:12px;color:#c9d4f0;background:linear-gradient(180deg,rgba(6,10,22,.85),rgba(6,10,22,0))}
+.dg-gallery-top > span:first-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.dg-gallery-top b{color:#fff;font-weight:500}
+.dg-gallery-top .dg-client-views{margin:0 0 0 auto;flex:none}
+.dg-gallery-top .dg-client-views button{padding:2px 7px}
+.dg-gallery-hint{font:10px var(--dg-mono);color:#9fb0d0;white-space:nowrap}
+@container (max-width:520px){.dg-gallery-hint{display:none}}
+.dg-gallery-strip{position:absolute;left:0;right:0;bottom:0;display:flex;gap:5px;padding:14px 8px 6px;overflow-x:auto;background:linear-gradient(0deg,rgba(6,10,22,.75),rgba(6,10,22,0))}
+.dg-gallery-strip button{flex:none;width:40px;height:40px;padding:0;border-radius:5px;border:1px solid rgba(255,255,255,.35);background:#dfe4ec;cursor:pointer;overflow:hidden;opacity:.75}
+.dg-gallery-strip button.on{opacity:1;border-color:rgba(134,220,255,.95);box-shadow:0 0 10px -2px rgba(134,220,255,.9)}
+.dg-screen .dg-gallery-strip img{width:100%;height:100%;object-fit:cover}
 .dg-screen-note{flex-direction:column;gap:10px;padding:24px;text-align:center;background:radial-gradient(60% 60% at 50% 40%,#0d1836,#04060d)}
 .dg-screen-note b{font-size:16px;font-weight:500;color:#e8f0ff;letter-spacing:1px}
 .dg-screen-note p{margin:0;max-width:440px;font-size:13px;line-height:1.7;color:var(--dg-dim)}
