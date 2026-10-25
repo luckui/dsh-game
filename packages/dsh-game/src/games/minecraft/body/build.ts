@@ -12,7 +12,7 @@
 import { goals, Movements } from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
 import type { MinecraftActionResult } from './contracts.js';
-import { protectMovementsFromFluid } from './fluidSafety.js';
+import { protectMovementsFromFalls, protectMovementsFromFluid } from './fluidSafety.js';
 import { patchedGoto } from './patchedGoto.js';
 import { isInteractive, isReplaceableForPlacement } from './placeBlock.js';
 
@@ -120,7 +120,7 @@ export async function buildStructure(bot: any, req: BuildRequest, helpers: Build
   /** 给悬空的格子垫的临时柱子（盖完拆掉） */
   const supports: Vec3[] = [];
   const oldMovements = bot.pathfinder.movements;
-  const movements = protectMovementsFromFluid(bot, new Movements(bot));
+  const movements = protectMovementsFromFalls(bot, protectMovementsFromFluid(bot, new Movements(bot)));
   movements.allowParkour = false;
   movements.exclusionAreasBreak.push((block: any) => (planned.has(key(block.position)) ? 100 : 0));
   movements.exclusionAreasPlace.push((block: any) => (planned.has(key(block.position)) ? 1000 : 0));

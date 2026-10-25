@@ -41,7 +41,7 @@ import type {
   MinecraftStatus,
 } from './protocol.js';
 import { buildMinecraftSnapshot } from './perception.js';
-import { protectMovementsFromFluid } from './fluidSafety.js';
+import { protectMovementsFromFalls, protectMovementsFromFluid } from './fluidSafety.js';
 import { runAbortableOperation } from './abortableOperation.js';
 import { patchedGoto, type PathfindResult } from './patchedGoto.js';
 import { measurePlayerGaze, PlayerGazeTracker } from './playerGaze.js';
@@ -480,10 +480,10 @@ export function createMineflayerAdapter(
     oxygenEmergencyActive = false;
     for (const plugin of dependencies.plugins) current.loadPlugin(plugin);
     if (current.pathfinder?.movements) {
-      protectMovementsFromFluid(current, current.pathfinder.movements);
+      protectMovementsFromFalls(current, protectMovementsFromFluid(current, current.pathfinder.movements));
     }
     if (current.collectBlock?.movements) {
-      protectMovementsFromFluid(current, current.collectBlock.movements);
+      protectMovementsFromFalls(current, protectMovementsFromFluid(current, current.collectBlock.movements));
     }
     if (current.pathfinder) {
       current.pathfinder.searchRadius = 64;

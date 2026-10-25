@@ -84,3 +84,38 @@ function offset(
 ): Vec3 {
   return new Vec3(position.x + x, position.y + y, position.z + z);
 }
+
+const FALL_BREAK_GUARD = Symbol('hiyori-fall-break-guard');
+/** 挖掉一格后，它下面空着超过这么多格就不挖（寻路器自己最多往下跳 4 格） */
+const MAX_SAFE_DROP = 3;
+
+/** 这一格下面连着有几格是空的（看到 8 格为止；没加载的当作空的） */
+export function dropBelow(bot: { blockAt(position: any): any }, position: { x: number; y: number; z: number }): number {
+  let drop = 0;
+  for (let d = 1; d <= 8; d++) {
+    const b = bot.blockAt(offset(position, 0, -d, 0));
+    if (b && (b.boundingBox === 'block' || liquidName(b))) break;
+    drop += 1;
+  }
+  return drop;
+}
+
+/**
+ * 寻路器为了够到下面的东西，会往下挖、或者往半空里垫方块搭过去再往下走：在浮空的平台、悬崖边、山洞顶上，
+ * 挖穿了、没垫上就是从高处掉下去（测试时从 200 格高摔死过两次）。
+ * 下面空着超过 3 格的地方：不挖，也不往那里垫方块（下面是水的不算空：水上搭桥照样可以）
+ */
+export function protectMovementsFromFalls<T extends {
+  exclusionAreasBreak?: Array<(block: any) => number>;
+  exclusionAreasPlace?: Array<(block: any) => number>;
+}>(bot: { blockAt(position: any): any }, movements: T): T {
+  const tagged = movements as T & { [FALL_BREAK_GUARD]?: boolean };
+  if (tagged[FALL_BREAK_GUARD]) return movements;
+  tagged[FALL_BREAK_GUARD] = true;
+  const overDrop = (block: any) => !!block?.position && dropBelow(bot, block.position) > MAX_SAFE_DROP;
+  movements.exclusionAreasBreak ??= [];
+  movements.exclusionAreasBreak.push((block: any) => (overDrop(block) ? 100 : 0));
+  movements.exclusionAreasPlace ??= [];
+  movements.exclusionAreasPlace.push((block: any) => (overDrop(block) ? 1000 : 0));
+  return movements;
+}

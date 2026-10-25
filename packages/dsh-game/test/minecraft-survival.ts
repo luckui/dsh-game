@@ -299,6 +299,21 @@ async function edgeCases(): Promise<void> {
   await inventoryMatches();
   await rcon(`kill @e[type=sheep,x=${X},y=${Y},z=${Z},distance=..30]`);
 
+  begin('不把脚下挖空：浮空的小平台，正下方 10 格有羊毛');
+  {
+    const F = { x: X - 14, y: Y, z: Z - 14 };
+    await rcon(`fill ${F.x - 1} ${F.y} ${F.z - 1} ${F.x + 1} ${F.y} ${F.z + 1} dirt`);
+    await rcon(`setblock ${F.x} ${F.y - 10} ${F.z} white_wool`);
+    await rcon(`tp ${NAME} ${F.x + 0.5} ${F.y + 1} ${F.z + 0.5}`);
+    await sleep(1500);
+    const wool = await act('collect', { name: 'white_wool', index: 1 }, 90_000);
+    const pos = (await rcon(`data get entity ${NAME} Pos`)).match(/-?\d+(\.\d+)?(?=d)/g)?.map(Number) ?? [];
+    check(pos.length === 3 && pos[1] >= F.y && /passed/i.test(await rcon(`execute if block ${F.x} ${F.y} ${F.z} dirt`)), `没把平台挖穿掉下去（她在 y=${pos[1]?.toFixed(1)}；${wool.slice(0, 100)}）`);
+    await rcon(`fill ${F.x - 1} ${F.y - 10} ${F.z - 1} ${F.x + 1} ${F.y} ${F.z + 1} air`);
+    await rcon(`tp ${NAME} ${X} ${Y + 1} ${Z}`);
+    await sleep(1500);
+  }
+
   begin('砍树：旁边地上有别的东西，报的背包变化要和真实一致');
   await reset();
   await rcon(`summon item ${X + 2} ${Y + 1} ${Z + 5} {Item:{id:"minecraft:stick",count:3}}`);

@@ -1,5 +1,5 @@
 import { goals, Movements } from 'mineflayer-pathfinder';
-import { protectMovementsFromFluid } from './fluidSafety.js';
+import { protectMovementsFromFalls, protectMovementsFromFluid } from './fluidSafety.js';
 import { Vec3 } from 'vec3';
 import { patchedGoto, type PathfindResult } from './patchedGoto.js';
 
@@ -173,7 +173,7 @@ async function goToPosition(
   const aboveOne = bot.blockAt(new Vec3(Math.floor(x), Math.floor(y) + 1, Math.floor(z)));
   const aboveTwo = bot.blockAt(new Vec3(Math.floor(x), Math.floor(y) + 2, Math.floor(z)));
   if (targetBlock?.name !== 'air' && aboveOne?.name === 'air' && aboveTwo?.name === 'air') y += 1;
-  bot.pathfinder.setMovements(protectMovementsFromFluid(bot, new Movements(bot)));
+  bot.pathfinder.setMovements(protectMovementsFromFalls(bot, protectMovementsFromFluid(bot, new Movements(bot))));
   return patchedGoto(bot, new goals.GoalNear(x, y, z, minDistance), { signal, onProgress });
 }
 
@@ -182,7 +182,7 @@ async function breakBlockAt(bot: any, originalBlock: any, signal?: AbortSignal):
   let block = bot.blockAt(originalBlock.position);
   if (!block || block.name === 'air' || block.name === 'water' || block.name === 'lava') return false;
   if (bot.entity.position.distanceTo(block.position) > 4.5) {
-    const movements = protectMovementsFromFluid(bot, new Movements(bot));
+    const movements = protectMovementsFromFalls(bot, protectMovementsFromFluid(bot, new Movements(bot)));
     movements.allowParkour = false;
     movements.allowSprinting = false;
     bot.pathfinder.setMovements(movements);

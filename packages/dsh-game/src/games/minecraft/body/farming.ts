@@ -12,6 +12,7 @@ import { Vec3 } from 'vec3';
 import type { MinecraftActionErrorCode, MinecraftActionResult } from './contracts.js';
 import { patchedGoto } from './patchedGoto.js';
 import { swimToShore } from './survival.js';
+import { protectMovementsFromFalls } from './fluidSafety.js';
 
 export interface FarmHelpers {
   /** 挖掉一格（走过去、换工具） */
@@ -82,7 +83,7 @@ function hasWaterNear(bot: any, ground: Vec3): boolean {
  */
 async function withFarmMovements<T>(bot: any, fn: () => Promise<T>): Promise<T> {
   const old = bot.pathfinder.movements;
-  const movements = new Movements(bot);
+  const movements = protectMovementsFromFalls(bot, new Movements(bot));
   for (const name of ['farmland', ...Object.keys(RIPE_AGE)]) {
     const id = bot.registry.blocksByName[name]?.id;
     if (id !== undefined) movements.blocksCantBreak.add(id);
