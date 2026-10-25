@@ -754,6 +754,26 @@ async function creativeCases(): Promise<void> {
   const loose = r.blueprint ? cellsOf(r.blueprint) : new Set<string>();
   check(!!r.blueprint && !loose.has('2,1,2') && loose.has('0,0,0') && r.blueprint.layers[3][0][0] === '.', `读得懂（${r.errors.join('；') || '没报错'}）`);
 
+  begin('形状：repeat、mirror、坡屋顶');
+  const at = (bp: any) => new Map(placements(bp, { x: 0, y: 0, z: 0 }).map((p: any) => [`${p.x},${p.y},${p.z}`, `${p.name}${p.props.facing ? `:${p.props.facing}` : ''}${p.props.hinge ? `:${p.props.hinge}` : ''}`]));
+  r = parseShapes('box glass from 0 0 0 to 0 1 0 repeat 4 step 3 0 0', none);
+  const rep = at(r.blueprint!);
+  check(rep.size === 8 && rep.has('9,1,0') && !rep.has('12,0,0'), `repeat：4 份，每份挪 3 格（${rep.size} 块）`);
+  r = parseShapes('box stone from 2 0 0 to 4 0 0 mirror x\nbox oak_stairs[facing=east] from 5 0 0 to 5 0 0 mirror x\nbox oak_door[facing=south,hinge=left] from 2 1 3 to 2 1 3 mirror x', none);
+  const mir = at(r.blueprint!);
+  check(mir.get('-3,0,0') === 'stone' && mir.get('5,0,0') === 'oak_stairs:east' && mir.get('-5,0,0') === 'oak_stairs:west' && mir.get('-2,1,3') === 'oak_door:south:right',
+    `mirror x：东西对称、楼梯朝向翻过来、门的合页左右对调（${mir.get('-5,0,0')}、${mir.get('-2,1,3')}）`);
+  r = parseShapes('roof spruce_stairs from -3 0 -2 to 3 0 2 gable fill oak_planks', none);
+  const gable = at(r.blueprint!);
+  check(gable.get('0,0,-2') === 'spruce_stairs:south' && gable.get('0,0,2') === 'spruce_stairs:north' && gable.get('0,2,0') === 'spruce_planks' && gable.get('-3,1,0') === 'oak_planks' && r.blueprint!.height === 3,
+    `人字顶：北坡朝南、南坡朝北、屋脊是木板、两头补了三角墙（屋脊 ${gable.get('0,2,0')}）`);
+  r = parseShapes('roof stone_brick_stairs from -3 0 -3 to 3 0 3 hip overhang 1', none);
+  const hip = at(r.blueprint!);
+  check(hip.get('-4,0,0') === 'stone_brick_stairs:east' && hip.get('4,0,0') === 'stone_brick_stairs:west' && hip.get('0,4,0') === 'stone_bricks' && r.blueprint!.width === 9,
+    `四坡顶（屋檐出 1 格）：西坡朝东、东坡朝西、尖顶是石砖（${hip.get('0,4,0')}）`);
+  r = parseShapes('roof oak_planks from 0 0 0 to 4 0 4', none);
+  check(!r.blueprint && /楼梯/.test(r.errors[0] ?? ''), `屋顶材料不是楼梯会说（${r.errors[0]}）`);
+
   begin('形状：写错了会说清楚');
   for (const [text, want] of [['sphere Q center 0 0', /center/], ['sphere Z center 0 0 0 radius 2', /materials/], ['box stone from 0 0 0 to 300 1 1', /太大/], ['torus stone center 0 0 0', /box/], ['blueprint 没有的 at 0 0 0', /没有叫/]] as [string, RegExp][]) {
     const e = parseShapes(text, none);
@@ -809,6 +829,16 @@ async function creativeCases(): Promise<void> {
   check(/做完了/.test(flew) && !!pos && pos.y > P.y + 10, `从屋里出来飞上去了（${flew.slice(0, 100)}）`);
   const back = await act('go', { text: `${P.x} ${P.y} ${P.z + 5}` }, 90_000);
   check(/做完了/.test(back), `飞回平台了（${back.slice(0, 100)}）`);
+
+  begin('创造模式：带人字顶的小屋（楼梯朝向在世界里也对）');
+  const hut = 'materials: P=oak_planks T=spruce_stairs\nbox P from -3 0 -2 to 3 3 2 hollow 1 open top\nroof T from -3 4 -2 to 3 4 2 gable fill P overhang 1';
+  check(/存好了/.test(await session.act({ action: 'design', name: '小屋', text: hut })), '小屋存好了');
+  (session as any).takeImage();
+  const H = { x: C.x + 12, y: C.y, z: C.z + 8 };
+  const hutLine = await act('build', { name: '小屋', text: `${H.x} ${H.y} ${H.z}` }, 120_000);
+  check(/：做完了/.test(hutLine), `盖完了（${hutLine.slice(0, 80)}）`);
+  const isAt = async (dx: number, dy: number, dz: number, b: string) => /passed/i.test(await rcon(`execute if block ${H.x + dx} ${H.y + dy} ${H.z + dz} ${b}`));
+  check(await isAt(0, 4, -3, 'spruce_stairs[facing=south]') && await isAt(0, 4, 3, 'spruce_stairs[facing=north]') && await isAt(0, 7, 0, 'spruce_planks'), '世界里：北坡楼梯朝南、南坡朝北、屋脊在顶上');
 
   begin('创造模式：字符图的门上下两半都在');
   await session.act({ action: 'template', name: 'cabin' });

@@ -8,12 +8,18 @@
  *   cone copper_block center 0 14 0 radius 2 height 4               尖顶
  *   cut box from -1 0 -7 to 1 3 -5                                  门洞
  *   blueprint 窗户 at 4 3 -7                                        把另一张图纸（字符图也行）放在这里
+ *   box G from 5 2 -1 to 5 3 -1 repeat 4 step 0 0 -3                一排 4 扇窗（每扇往北挪 3 格）
+ *   box S from 3 0 -2 to 8 4 2 mirror x                             东边一翼，镜像出西边那一翼
+ *   roof spruce_stairs from -6 5 -4 to 6 5 4 gable fill P overhang 1  人字坡屋顶（楼梯朝向自动算），两头补三角墙
  *
  * 规则：
  *   - 坐标是方块坐标（整数），相对于盖的时候给的那个点；x 往东，y 往上，z 往南
  *   - 一格算在形状里：这一格的中心落在形状里（球、圆柱的半径按 r + 0.5 算：半径 6 的球正好 13 格宽）
  *   - hollow t：只留外壳，厚 t 格；外壳是封闭的（往里收 t 格剩下的才挖空）。半球、拱的切面，open 指定的那一头不封
  *   - 后写的盖掉先写的；cut 是从前面的形状里挖掉（不动世界里原来的东西）；材料写 air 是把世界里那些格子清成空气
+ *   - repeat N step dx dy dz：这一行画 N 份，每份挪一个步长；mirror x / z / xz：再按 x=0 / z=0 的平面画镜像（楼梯、门的朝向跟着翻，左右对调）
+ *   - roof 楼梯 from x1 y z1 to x2 y z2：在这块地上用楼梯一层层往里收（每层高一格），朝向朝屋脊往上；gable 人字顶（axis x / z 是屋脊的方向，默认顺着长边），
+ *     hip 四坡顶；宽度是单数时屋脊是一排实心方块（ridge 方块，默认是这种楼梯对应的木板 / 砖）；fill 方块：补人字顶两头的三角墙；overhang n：屋檐往外多出 n 格
  *   - 最大 256 × 256 × 256，最多 100 万块
  */
 import type { Blueprint, BlockSpec } from './blueprint.js';
@@ -26,7 +32,7 @@ export interface ShapeResult {
   warnings: string[];
 }
 
-const KINDS = ['box', 'sphere', 'cylinder', 'cone', 'pyramid', 'arch', 'line', 'blueprint'];
+const KINDS = ['box', 'sphere', 'cylinder', 'cone', 'pyramid', 'arch', 'line', 'roof', 'blueprint'];
 const GRAVITY = /^(sand|red_sand|gravel|anvil|chipped_anvil|damaged_anvil|.*_concrete_powder|dragon_egg|suspicious_sand|suspicious_gravel|scaffolding)$/;
 const POOL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789#@$%&*+=-~^!?<>/|;:\'"`,()[]{}';
 
@@ -57,7 +63,7 @@ function parseLine(line: string): { cut: boolean; kind: string; material: string
   const kind = tokens[i++]?.toLowerCase() ?? '';
   if (!KINDS.includes(kind)) return `看不懂「${line}」：形状只有 ${KINDS.join(' / ')}（前面可以加 cut）`;
   let material: string | null = null;
-  const KEYS = new Set(['from', 'to', 'center', 'radius', 'height', 'length', 'axis', 'hollow', 'open', 'at', 'top', 'bottom', 'down']);
+  const KEYS = new Set(['from', 'to', 'center', 'radius', 'height', 'length', 'axis', 'hollow', 'open', 'at', 'top', 'bottom', 'down', 'repeat', 'step', 'mirror', 'overhang', 'gable', 'hip', 'ridge', 'fill']);
   if (kind === 'blueprint') {
     material = tokens[i++] ?? null;
     if (!material) return `「${line}」：blueprint 后面写图纸的名字`;
@@ -73,14 +79,15 @@ function parseLine(line: string): { cut: boolean; kind: string; material: string
   const words: Record<string, string> = {};
   while (i < tokens.length) {
     const key = tokens[i++].toLowerCase();
-    if (['top', 'bottom', 'down'].includes(key)) { flags.add(key); continue; }
-    if (key === 'axis' || key === 'open') {
-      const v = tokens[i++]?.toLowerCase();
-      if (!v) return `「${line}」：${key} 后面要写值`;
-      words[key] = v;
+    if (['top', 'bottom', 'down', 'gable', 'hip'].includes(key)) { flags.add(key); continue; }
+    if (key === 'axis' || key === 'open' || key === 'mirror' || key === 'ridge' || key === 'fill') {
+      const raw = tokens[i++];
+      if (!raw) return `「${line}」：${key} 后面要写值`;
+      // ridge / fill 是材料：字母分大小写
+      words[key] = key === 'ridge' || key === 'fill' ? raw : raw.toLowerCase();
       continue;
     }
-    if (!KEYS.has(key)) return `「${line}」里的「${key}」看不懂（能写的：from to center radius height length axis hollow open top bottom down at）`;
+    if (!KEYS.has(key)) return `「${line}」里的「${key}」看不懂（能写的：from to center radius height length axis hollow open top bottom down at repeat step mirror，roof 还有 gable hip ridge fill overhang）`;
     const values: number[] = [];
     while (i < tokens.length && /^-?\d+(\.\d+)?$/.test(tokens[i])) values.push(Number(tokens[i++]));
     if (key === 'hollow' && !values.length) values.push(1);
@@ -196,6 +203,77 @@ function makeShape(kind: string, nums: Record<string, number[]>, flags: Set<stri
   }
 }
 
+/** 楼梯对应的实心方块（屋脊默认用它）：oak_stairs → oak_planks，stone_brick_stairs → stone_bricks …… 不对的话 check-blocks 会说 */
+function baseOfStairs(name: string): string {
+  const b = name.replace(/_stairs$/, '');
+  if (/^(oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|bamboo|crimson|warped|pale_oak)$/.test(b)) return `${b}_planks`;
+  if (/brick$/.test(b)) return `${b}s`;
+  if (/tile$/.test(b)) return `${b}s`;
+  if (b === 'purpur' || b === 'quartz') return `${b}_block`;
+  return b;
+}
+
+type Cell = [number, number, number, string | null];
+
+/**
+ * 坡屋顶：在 from～to 这块地上用楼梯一层层往里收，每层高一格。楼梯朝向朝屋脊往上（北边那坡的楼梯朝南……），
+ * 最上面剩一排时放屋脊方块；人字顶 fill 补两头的三角墙
+ */
+function roofCells(stairs: BlockSpec, ridge: BlockSpec, fill: BlockSpec | null, nums: Record<string, number[]>, flags: Set<string>, words: Record<string, string>, line: string): Cell[] {
+  const [ax, y0, az] = need(nums, 'from', 3, line);
+  const [bx, , bz] = need(nums, 'to', 3, line);
+  const o = nums.overhang?.[0] ?? 0;
+  const x1 = Math.min(ax, bx) - o, x2 = Math.max(ax, bx) + o, z1 = Math.min(az, bz) - o, z2 = Math.max(az, bz) + o;
+  if (x2 - x1 + 1 > SHAPE_LIMITS.size || z2 - z1 + 1 > SHAPE_LIMITS.size) throw new Error(`「${line}」太大了`);
+  const st = (facing: string) => specKey({ name: stairs.name, props: { ...stairs.props, facing, half: stairs.props.half ?? 'bottom' } });
+  const R = specKey(ridge);
+  const F = fill ? specKey(fill) : null;
+  const out: Cell[] = [];
+  if (flags.has('hip')) {
+    for (let k = 0; ; k++) {
+      const xa = x1 + k, xb = x2 - k, za = z1 + k, zb = z2 - k, y = y0 + k;
+      if (xa > xb || za > zb) break;
+      if (za === zb) { for (let x = xa; x <= xb; x++) out.push([x, y, za, R]); break; }
+      if (xa === xb) { for (let z = za; z <= zb; z++) out.push([xa, y, z, R]); break; }
+      for (let x = xa; x <= xb; x++) { out.push([x, y, za, st('south')]); out.push([x, y, zb, st('north')]); }
+      for (let z = za + 1; z <= zb - 1; z++) { out.push([xa, y, z, st('east')]); out.push([xb, y, z, st('west')]); }
+    }
+    return out;
+  }
+  // 人字顶：屋脊默认顺着长边
+  const axis = words.axis ?? (x2 - x1 >= z2 - z1 ? 'x' : 'z');
+  if (axis !== 'x' && axis !== 'z') throw new Error(`「${line}」：屋顶的 axis 只能是 x 或 z（屋脊的方向）`);
+  for (let k = 0; ; k++) {
+    const y = y0 + k;
+    if (axis === 'x') {
+      const za = z1 + k, zb = z2 - k;
+      if (za > zb) break;
+      if (za === zb) { for (let x = x1; x <= x2; x++) out.push([x, y, za, R]); break; }
+      for (let x = x1; x <= x2; x++) { out.push([x, y, za, st('south')]); out.push([x, y, zb, st('north')]); }
+      if (F) for (let z = za + 1; z <= zb - 1; z++) { out.push([x1 + o, y, z, F]); out.push([x2 - o, y, z, F]); }
+    } else {
+      const xa = x1 + k, xb = x2 - k;
+      if (xa > xb) break;
+      if (xa === xb) { for (let z = z1; z <= z2; z++) out.push([xa, y, z, R]); break; }
+      for (let z = z1; z <= z2; z++) { out.push([xa, y, z, st('east')]); out.push([xb, y, z, st('west')]); }
+      if (F) for (let x = xa + 1; x <= xb - 1; x++) { out.push([x, y, z1 + o, F]); out.push([x, y, z2 - o, F]); }
+    }
+  }
+  return out;
+}
+
+/** 镜像过去的方块：x 镜像东西对调、z 镜像南北对调；只镜像一个方向时左右对调（门的合页、楼梯的拐角） */
+function flipKey(key: string, fx: boolean, fz: boolean): string {
+  if (!key.includes('[') || (!fx && !fz)) return key;
+  const SWAP: Record<string, string> = fx && fz ? { east: 'west', west: 'east', north: 'south', south: 'north' } : fx ? { east: 'west', west: 'east' } : { north: 'south', south: 'north' };
+  return key.replace(/\[(.*)\]$/, (_m, inner: string) => `[${inner.split(',').map((kv) => {
+    const [k, v] = kv.split('=');
+    if (k === 'facing' && SWAP[v]) return `${k}=${SWAP[v]}`;
+    if (fx !== fz && /left|right/.test(v)) return `${k}=${v.replace(/left|right/, (w) => (w === 'left' ? 'right' : 'left'))}`;
+    return kv;
+  }).join(',')}]`);
+}
+
 /** 方块名 → BlockSpec：oak_stairs[facing=north,half=top] */
 function specOf(material: string): BlockSpec | string {
   const m = material.match(/^([a-z0-9_:]+)(?:\[([a-z0-9_=,]*)\])?$/i);
@@ -242,6 +320,9 @@ export function parseShapes(text: string, lookup: (name: string) => Blueprint | 
     const parsed = parseLine(line);
     if (typeof parsed === 'string') { errors.push(parsed); continue; }
     const { cut, kind, material, nums, flags, words } = parsed;
+    /** 这一行画出来的格子（null 是 cut 挖掉） */
+    const drawn: Cell[] = [];
+    const resolve = (m: string): BlockSpec | null | undefined | string => (airNames.has(m) || m.toLowerCase() === 'air' ? null : legend[m] ?? (m.length === 1 ? undefined : specOf(m)));
 
     // 放另一张图纸
     if (kind === 'blueprint') {
@@ -253,50 +334,86 @@ export function parseShapes(text: string, lookup: (name: string) => Blueprint | 
       for (let k = 0; k < other.height; k++) for (let r = 0; r < other.depth; r++) for (let c = 0; c < other.width; c++) {
         const ch = other.layers[k]?.[r]?.[c] ?? ' ';
         if (ch === ' ') continue;
-        const key = `${ax + off.x + c},${ay + off.y + k},${az + off.z + r}`;
-        if (cut) { cells.delete(key); continue; }
-        if (ch === '.') { cells.set(key, 'air'); continue; }
+        const at = [ax + off.x + c, ay + off.y + k, az + off.z + r] as const;
+        if (cut) { drawn.push([...at, null]); continue; }
+        if (ch === '.') { drawn.push([...at, 'air']); continue; }
         const spec = other.legend[ch];
         specs.set(specKey(spec), spec);
-        cells.set(key, specKey(spec));
+        drawn.push([...at, specKey(spec)]);
       }
-      continue;
+    } else if (kind === 'roof') {
+      if (cut) { errors.push(`「${line}」：屋顶不能 cut`); continue; }
+      const stairs = resolve(material!);
+      if (stairs === undefined) { errors.push(`「${line}」：材料「${material}」不在 materials 里`); continue; }
+      if (typeof stairs === 'string') { errors.push(stairs); continue; }
+      if (!stairs || !/_stairs$/.test(stairs.name)) { errors.push(`「${line}」：屋顶的材料要是楼梯（比如 spruce_stairs、stone_brick_stairs）`); continue; }
+      const ridge = words.ridge ? resolve(words.ridge) : { name: baseOfStairs(stairs.name), props: {} };
+      const fill = words.fill ? resolve(words.fill) : null;
+      if (ridge === undefined || fill === undefined || typeof ridge === 'string' || typeof fill === 'string' || ridge === null) { errors.push(`「${line}」：ridge / fill 的材料看不懂`); continue; }
+      try {
+        for (const c of roofCells(stairs, ridge, fill, nums, flags, words, line)) {
+          drawn.push(c);
+          const sp = specOf(c[3]!);
+          if (typeof sp !== 'string') specs.set(c[3]!, sp);
+        }
+      } catch (err) {
+        errors.push((err as Error).message);
+        continue;
+      }
+    } else {
+      let shape: Shape;
+      try {
+        shape = makeShape(kind, nums, flags, words, line);
+      } catch (err) {
+        errors.push((err as Error).message);
+        continue;
+      }
+      const size = shape.max.map((v, k) => v - shape.min[k] + 1);
+      if (size.some((s) => s > SHAPE_LIMITS.size)) { errors.push(`「${line}」太大了：${size.join(' × ')}，一个方向最多 ${SHAPE_LIMITS.size} 格`); continue; }
+      const volume = size[0] * size[1] * size[2];
+      budget -= volume;
+      if (budget < 0) { errors.push('形状加起来太大了，算不过来（最多 100 万块）'); break; }
+
+      let value: string | null = null;
+      if (!cut) {
+        const m = material!;
+        const spec = resolve(m);
+        if (spec === undefined) { errors.push(`「${line}」：材料「${m}」不在 materials 里`); continue; }
+        if (typeof spec === 'string') { errors.push(spec); continue; }
+        if (spec) specs.set(specKey(spec), spec);
+        value = spec ? specKey(spec) : 'air';
+      }
+      const t = nums.hollow?.[0] ?? 0;
+      // 挖空心：离「外面」t 步以内的才留下（6 个方向一步步走）
+      const reach: [number, number, number][] = [];
+      for (let dx = -t; dx <= t; dx++) for (let dy = -t; dy <= t; dy++) for (let dz = -t; dz <= t; dz++) {
+        if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) <= t && (dx || dy || dz)) reach.push([dx, dy, dz]);
+      }
+      for (let x = shape.min[0]; x <= shape.max[0]; x++) for (let y = shape.min[1]; y <= shape.max[1]; y++) for (let z = shape.min[2]; z <= shape.max[2]; z++) {
+        if (!shape.contains(x, y, z)) continue;
+        if (t > 0 && !reach.some(([dx, dy, dz]) => !shape.full(x + dx, y + dy, z + dz))) continue;
+        drawn.push([x, y, z, cut ? null : value!]);
+      }
     }
 
-    let shape: Shape;
-    try {
-      shape = makeShape(kind, nums, flags, words, line);
-    } catch (err) {
-      errors.push((err as Error).message);
-      continue;
-    }
-    const size = shape.max.map((v, k) => v - shape.min[k] + 1);
-    if (size.some((s) => s > SHAPE_LIMITS.size)) { errors.push(`「${line}」太大了：${size.join(' × ')}，一个方向最多 ${SHAPE_LIMITS.size} 格`); continue; }
-    const volume = size[0] * size[1] * size[2];
-    budget -= volume;
+    // 重复、镜像
+    const times = Math.max(1, Math.round(nums.repeat?.[0] ?? 1));
+    if (nums.repeat && !nums.step) { errors.push(`「${line}」：repeat 要配 step dx dy dz（每份挪多少）`); continue; }
+    const [sx, sy, sz] = nums.step ? [nums.step[0] ?? 0, nums.step[1] ?? 0, nums.step[2] ?? 0] : [0, 0, 0];
+    const m = words.mirror ?? '';
+    if (m && !/^(x|z|xz|zx)$/.test(m)) { errors.push(`「${line}」：mirror 只能是 x、z 或 xz`); continue; }
+    const flips: [boolean, boolean][] = [[false, false]];
+    if (m.includes('x')) flips.push([true, false]);
+    if (m.includes('z')) flips.push([false, true]);
+    if (m.includes('x') && m.includes('z')) flips.push([true, true]);
+    budget -= drawn.length * times * flips.length;
     if (budget < 0) { errors.push('形状加起来太大了，算不过来（最多 100 万块）'); break; }
-
-    let value: string | null = null;
-    if (!cut) {
-      const m = material!;
-      const spec = airNames.has(m) || m.toLowerCase() === 'air' ? null : legend[m] ?? (m.length === 1 ? undefined : specOf(m));
-      if (spec === undefined) { errors.push(`「${line}」：材料「${m}」不在 materials 里`); continue; }
-      if (typeof spec === 'string') { errors.push(spec); continue; }
-      if (spec) specs.set(specKey(spec), spec);
-      value = spec ? specKey(spec) : 'air';
-    }
-    const t = nums.hollow?.[0] ?? 0;
-    // 挖空心：离「外面」t 步以内的才留下（6 个方向一步步走）
-    const reach: [number, number, number][] = [];
-    for (let dx = -t; dx <= t; dx++) for (let dy = -t; dy <= t; dy++) for (let dz = -t; dz <= t; dz++) {
-      if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) <= t && (dx || dy || dz)) reach.push([dx, dy, dz]);
-    }
-    for (let x = shape.min[0]; x <= shape.max[0]; x++) for (let y = shape.min[1]; y <= shape.max[1]; y++) for (let z = shape.min[2]; z <= shape.max[2]; z++) {
-      if (!shape.contains(x, y, z)) continue;
-      if (t > 0 && !reach.some(([dx, dy, dz]) => !shape.full(x + dx, y + dy, z + dz))) continue;
-      const key = `${x},${y},${z}`;
-      if (cut) cells.delete(key);
-      else cells.set(key, value!);
+    for (let r = 0; r < times; r++) for (const [fx, fz] of flips) for (const [x, y, z, v] of drawn) {
+      const key = `${(fx ? -x : x) + r * sx},${y + r * sy},${(fz ? -z : z) + r * sz}`;
+      if (v === null) { cells.delete(key); continue; }
+      const flipped = flipKey(v, fx, fz);
+      if (flipped !== v && !specs.has(flipped)) { const sp = specOf(flipped); if (typeof sp !== 'string') specs.set(flipped, sp); }
+      cells.set(key, flipped);
     }
   }
   if (errors.length) return { blueprint: null, errors, warnings };

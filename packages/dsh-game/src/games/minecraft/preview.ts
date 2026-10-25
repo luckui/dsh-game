@@ -4,6 +4,7 @@
  *   - 方块颜色：从游戏 jar 里按方块状态 → 模型 → 贴图找到顶面和侧面的贴图，算平均色；草、树叶按默认的绿色上色；玻璃这类半透明
  *   - 画法：45° 斜俯视的方块图（顶面亮、两个侧面暗一点，每块描一圈细边看得出一格格），从东南、西南、西北、东北四个角各看一张，拼成 2×2 一张图
  *   - 只画看得见的方块（六面都被挡住的不画）；先画远的再画近的
+ *   - 台阶画半块，楼梯画「下半块 + 朝向那边的上半块」（倒装的反过来）：屋顶的坡看得出来，不会画成台阶状的金字塔
  * 没有 jar（没装客户端）就没有渲染图，只有字符投影。
  */
 import zlib from 'node:zlib';
@@ -194,11 +195,12 @@ export function renderBlueprint(bp: Blueprint, colors: BlockColors, panel = 480)
 
   const solid = (k: number, r: number, c: number) => { const ch = bp.layers[k]?.[r]?.[c]; return !!ch && ch !== '.' && ch !== ' '; };
   // 看得见的方块（六面里至少一面挨着空的）
-  const visible: { c: number; r: number; k: number; col: FaceColors }[] = [];
+  const visible: { c: number; r: number; k: number; col: FaceColors; name: string; props: Record<string, string> }[] = [];
   for (let k = 0; k < bp.height; k++) for (let r = 0; r < bp.depth; r++) for (let c = 0; c < bp.width; c++) {
     if (!solid(k, r, c)) continue;
     if (solid(k + 1, r, c) && solid(k - 1, r, c) && solid(k, r + 1, c) && solid(k, r - 1, c) && solid(k, r, c + 1) && solid(k, r, c - 1)) continue;
-    visible.push({ c, r, k, col: colors.of(bp.legend[bp.layers[k][r][c]].name) });
+    const spec = bp.legend[bp.layers[k][r][c]];
+    visible.push({ c, r, k, col: colors.of(spec.name), name: spec.name, props: spec.props });
   }
 
   VIEWS.forEach((view, vi) => {
@@ -224,19 +226,58 @@ export function renderBlueprint(bp: Blueprint, colors: BlockColors, panel = 480)
     const order = visible.map((b) => { const [u, v] = view.map(b.c, b.r, bp.width, bp.depth); return { ...b, u, v }; })
       .sort((p, q) => p.u + p.v - (q.u + q.v) || p.k - q.k);
     const edge = a >= 3;
+    // 格子里的一个点（u、v、y 都可以带小数）→ 画面上的像素
+    const proj = (u: number, v: number, y: number): [number, number] => [ox + (u - v) * a + a, oy + ((u + v) * a) / 2 - y * a];
+    /** 画一个长方体看得见的三个面（顶、+u 那面、+v 那面），每面描一圈暗边 */
+    const box = (u0: number, v0: number, y0: number, u1: number, v1: number, y1: number, col: FaceColors) => {
+      const faces: [[number, number][], [number, number, number], number][] = [
+        [[proj(u0, v0, y1), proj(u1, v0, y1), proj(u1, v1, y1), proj(u0, v1, y1)], col.top, 1],
+        [[proj(u1, v0, y0), proj(u1, v1, y0), proj(u1, v1, y1), proj(u1, v0, y1)], col.side, 0.8],
+        [[proj(u0, v1, y0), proj(u1, v1, y0), proj(u1, v1, y1), proj(u0, v1, y1)], col.side, 0.62],
+      ];
+      for (const [pts, base, shade] of faces) fillQuad(pts, [base[0] * shade, base[1] * shade, base[2] * shade], col.alpha, edge);
+    };
+    const fillQuad = (pts: [number, number][], rgb: [number, number, number], alpha: number, outline: boolean) => {
+      const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+      const minX = Math.floor(Math.min(...xs)), maxX = Math.ceil(Math.max(...xs)), minY = Math.floor(Math.min(...ys)), maxY = Math.ceil(Math.max(...ys));
+      // 凸四边形：点在四条边的同一侧就在里面；离边不到一像素的描暗
+      const edges = pts.map((p, i) => { const q = pts[(i + 1) % 4]; const len = Math.hypot(q[0] - p[0], q[1] - p[1]) || 1; return { p, q, len }; });
+      for (let y = minY; y < maxY; y++) for (let x = minX; x < maxX; x++) {
+        const cx = x + 0.5, cy = y + 0.5;
+        let sign = 0, inside = true, near = Infinity;
+        for (const { p, q, len } of edges) {
+          const cross = (q[0] - p[0]) * (cy - p[1]) - (q[1] - p[1]) * (cx - p[0]);
+          if (Math.abs(cross) < 1e-9) continue;
+          const sg = Math.sign(cross);
+          if (sign && sg !== sign) { inside = false; break; }
+          sign = sg;
+          near = Math.min(near, Math.abs(cross) / len);
+        }
+        if (!inside) continue;
+        const k = outline && near < 1 ? 0.82 : 1;
+        put(x, y, [rgb[0] * k, rgb[1] * k, rgb[2] * k], alpha);
+      }
+    };
+    // 楼梯朝向（世界里的东南西北）→ 这张图里 u、v 的方向
+    const dirUV = (b: { c: number; r: number }, facing: string): [number, number] => {
+      const d = ({ north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] } as Record<string, [number, number]>)[facing] ?? [0, 0];
+      const [u0, v0] = view.map(b.c, b.r, bp.width, bp.depth);
+      const [u1, v1] = view.map(b.c + d[0], b.r + d[1], bp.width, bp.depth);
+      return [u1 - u0, v1 - v0];
+    };
     for (const b of order) {
-      const sx = ox + (b.u - b.v) * a;
-      const sy = Math.round(oy + ((b.u + b.v) * a) / 2 - b.k * a - a);
-      const top = b.col.top, side = b.col.side;
-      for (let px = 0; px < 2 * a; px++) for (let py = 0; py < 2 * a; py++) {
-        const fx = px + 0.5, fy = py + 0.5;
-        let shade = 0, base = side;
-        const topDist = Math.abs(fx - a) / a + Math.abs(fy - a / 2) / (a / 2);
-        if (topDist <= 1) { shade = 1; base = top; if (edge && topDist > 1 - 1.2 / a) shade = 0.82; }
-        else if (fx < a && fy > a / 2 + fx / 2 && fy <= 1.5 * a + fx / 2) { shade = 0.62; if (edge && (fx < 1 || fy > 1.5 * a + fx / 2 - 1)) shade = 0.5; }
-        else if (fx >= a && fy > a - (fx - a) / 2 && fy <= 2 * a - (fx - a) / 2) { shade = 0.8; if (edge && (fx > 2 * a - 1 || fy > 2 * a - (fx - a) / 2 - 1)) shade = 0.66; }
-        if (!shade) continue;
-        put(sx + px, sy + py, [base[0] * shade, base[1] * shade, base[2] * shade], b.col.alpha);
+      const { u, v, k: y } = b;
+      const half = b.props.half === 'top' || b.props.type === 'top' ? 'top' : 'bottom';
+      if (/_slab$/.test(b.name) && b.props.type !== 'double') {
+        box(u, v, y + (half === 'top' ? 0.5 : 0), u + 1, v + 1, y + (half === 'top' ? 1 : 0.5), b.col);
+      } else if (/_stairs$/.test(b.name)) {
+        const [du, dv] = dirUV(b, b.props.facing ?? 'north');
+        // 高的那一半在朝向那边
+        const ua = du > 0 ? u + 0.5 : u, ub = du < 0 ? u + 0.5 : u + 1, va = dv > 0 ? v + 0.5 : v, vb = dv < 0 ? v + 0.5 : v + 1;
+        if (half === 'bottom') { box(u, v, y, u + 1, v + 1, y + 0.5, b.col); box(ua, va, y + 0.5, ub, vb, y + 1, b.col); }
+        else { box(ua, va, y, ub, vb, y + 0.5, b.col); box(u, v, y + 0.5, u + 1, v + 1, y + 1, b.col); }
+      } else {
+        box(u, v, y, u + 1, v + 1, y + 1, b.col);
       }
     }
   });

@@ -232,7 +232,8 @@ export class MinecraftSession implements GameSession {
       '【形状图纸】design 除了字符图，也能用形状写（大的、圆的、斜的用这个）。先写一行 materials: Q=quartz_block S=stone_bricks（字母=方块，方块可以带 [facing=north] 这样的状态），再一行一个形状：'
         + 'box M from x y z to x y z；sphere M center x y z radius r（写三个数 rx ry rz 是椭球；加 top / bottom 只要上半 / 下半）；cylinder M center x y z radius r height h（底面中心，默认竖着往上；axis x / z 横着放，沿 +x / +z 方向伸长）；'
         + 'cone M 或 pyramid M center x y z radius r height h（底面中心往上收成尖，加 down 尖朝下）；arch M center x y z radius r length l axis x 或 z（拱：半圆朝上，沿轴伸长）；line M from x y z to x y z；blueprint 图纸名 at x y z（把一张存好的图纸放在这里，西北角最下面对着这个点）。'
-        + '形状后面可以加 hollow t（空心，壁厚 t）、open top / bottom / both（空心时那一头不封口；半球和拱的切面本来就是开口）。前面加 cut 是从前面画的形状里挖掉（门洞、窗户），材料写 air 是把世界里那些格子清空。'
+        + 'roof 楼梯 from x1 y z1 to x2 y z2（坡屋顶：在这块地上用楼梯一层层往里收，楼梯朝向自动算；加 gable 是人字顶（axis x / z 是屋脊方向，默认顺着长边），加 hip 是四坡顶；ridge 方块 指定屋脊，fill 方块 补人字顶两头的三角墙，overhang n 屋檐往外多出 n 格）。'
+        + '形状后面可以加 hollow t（空心，壁厚 t）、open top / bottom / both（空心时那一头不封口；半球和拱的切面本来就是开口）；repeat N step dx dy dz（这一行画 N 份，每份挪一个步长：一排窗、一圈柱子）；mirror x / z / xz（再按 x=0 / z=0 的平面画镜像：对称的两翼，楼梯门的朝向跟着翻）。前面加 cut 是从前面画的形状里挖掉（门洞、窗户），材料写 air 是把世界里那些格子清空。'
         + '坐标都是方块坐标，相对于 build 时给的那个点（形状里的 0 0 0），x 往东、y 往上、z 往南；格子中心落在形状里就算（半径 6 的球 13 格宽）；后写的盖掉先写的。最大 256×256×256、100 万块。用 view 看某一层的切片，附一张只画到那一层的切开图（看里面是不是空的、楼层怎么分）。',
       '【下界】用 10 块黑曜石搭一个门框（参考图纸 nether_portal），拿打火石（flint_and_steel：1 铁锭 + 1 燧石）点门框里面最底下那块的上面，门框里会亮起紫色的传送门；走进去站一会儿就到了下界，从下界的门走回来就回到主世界。黑曜石要钻石镐才挖得动；岩浆源头碰到水会变成黑曜石，流动的岩浆碰到水变成圆石。下界到处是岩浆；床在那里一睡就会爆炸；水倒出来会马上蒸发；猪灵会打没穿金盔甲的人。',
       '【日志】每个世界有一本日志：你的目标、存好的图纸、用 mark 记的地点，还有盖过的房子、种过的地、床、死在哪，下次来这个世界还在。',
