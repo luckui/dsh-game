@@ -475,6 +475,7 @@ export function createMineflayerAdapter(
     });
     bot = current;
     current.once('login', () => fixPickaxeSpeeds(current.registry));
+    guardOwnOxygen(current);
     stopFollowSession();
     lastBreathablePosition = undefined;
     oxygenEmergencyActive = false;
@@ -3748,6 +3749,27 @@ async function collectSugarCane(
   } finally {
     request.signal.removeEventListener('abort', cancel);
   }
+}
+
+/**
+ * mineflayer 4.39 收到任何实体的 entity_metadata，只要带 air_supply 就写进 bot.oxygenLevel（entities.js 没核对是不是她自己），
+ * 旁边的鱿鱼、溺尸、别的玩家在水里憋气，她的氧气就跟着掉，在岸上也会被当成要淹死。
+ * 只让她自己那条包写进来：包先经过这里记下是谁的，mineflayer 再写的时候不是她就不收（'breath' 事件照发，读到的是她的真实值）
+ */
+export function guardOwnOxygen(bot: any): void {
+  const client = bot?._client;
+  if (typeof client?.prependListener !== 'function') return;
+  let ownPacket = false;
+  let oxygen = typeof bot.oxygenLevel === 'number' ? bot.oxygenLevel : 20;
+  client.prependListener('entity_metadata', (packet: any) => {
+    ownPacket = bot.entity?.id != null && packet?.entityId === bot.entity.id;
+  });
+  Object.defineProperty(bot, 'oxygenLevel', {
+    configurable: true,
+    enumerable: true,
+    get: () => oxygen,
+    set: (value: number) => { if (ownPacket) oxygen = value; },
+  });
 }
 
 /**

@@ -15,7 +15,7 @@ import { MinecraftSession } from '../src/games/minecraft/session.js';
 import { rcon as rconRaw, type RconTarget } from '../src/games/minecraft/rcon.js';
 
 const ROOT = path.resolve(process.argv[2] ?? '.');
-/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量）、build（盖房子）、farm（种地、养动物）、journal（世界日志）、nether（桶、黑曜石、下界传送门）、creative（形状图纸、创造模式一层层盖）、不填 = 全部 */
+/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量、氧气只算自己的；breath 只跑氧气这项）、build（盖房子）、farm（种地、养动物）、journal（世界日志）、nether（桶、黑曜石、下界传送门）、creative（形状图纸、创造模式一层层盖）、不填 = 全部 */
 const SUITE = process.argv[3] ?? 'all';
 const props = Object.fromEntries(
   fs.readFileSync(path.join(ROOT, '.mc-server', 'server.properties'), 'utf8').split(/\r?\n/)
@@ -320,6 +320,38 @@ async function edgeCases(): Promise<void> {
   await rcon(`summon item ${X + 3} ${Y + 1} ${Z + 6} {Item:{id:"minecraft:apple",count:1}}`);
   await sleep(500);
   await step('collect', { name: 'oak_log', index: 4 }, { atLeast: { oak_log: 4 } });
+
+  await breathCases();
+}
+
+/** 氧气只算她自己的：旁边的生物在水里憋气，她站在岸上，氧气不该跟着掉 */
+async function breathCases(): Promise<void> {
+  begin('氧气：旁边水里有憋着气的猪，她在岸上，氧气一直是满的');
+  // 玻璃罩着一格 1×2 的水，猪整个泡在里面（无敌：一直憋着气、一直淹，不会死），离她 10 来格
+  const P = { x: X - 11, y: Y + 2, z: Z + 11 };
+  await rcon(`fill ${P.x - 1} ${P.y - 1} ${P.z - 1} ${P.x + 1} ${P.y + 2} ${P.z + 1} glass hollow`);
+  await rcon(`fill ${P.x} ${P.y} ${P.z} ${P.x} ${P.y + 1} ${P.z} water`);
+  await rcon(`tp ${NAME} ${X} ${Y + 1} ${Z}`);
+  await sleep(1000);
+  const where = async () => (await rcon(`data get entity ${NAME} Pos`)).match(/-?\d+(\.\d+)?(?=d)/g)?.map(Number) ?? [];
+  const start = await where();
+  for (let i = 0; i < 2; i++) await rcon(`summon pig ${P.x + 0.5} ${P.y} ${P.z + 0.5} {Air:0s,Invulnerable:1b}`);
+  const seen: number[] = [];
+  const heard: string[] = [];
+  for (let i = 0; i < 12; i++) {
+    heard.push(...(await session.wait(AbortSignal.timeout(500), 500)).lines);
+    const snap = await body().command<any>('snapshot', {}, 10_000);
+    seen.push(Number(snap?.body?.oxygen));
+  }
+  // 身体以为要淹死会自己去找空气（她收到「憋死」那句要等它找完）：再听一会儿
+  for (let i = 0; i < 10; i++) heard.push(...(await session.wait(AbortSignal.timeout(1000), 1000)).lines);
+  const end = await where();
+  const moved = start.length === 3 && end.length === 3 ? Math.hypot(end[0] - start[0], end[2] - start[2]) : NaN;
+  check(seen.every((o) => o === 20), `身体报的氧气都是 20（${seen.join(' ')}）`);
+  check(!heard.some((l) => /憋死/.test(l)), `她没收到「在水里憋死」${heard.length ? `（她收到：${heard.join(' / ').slice(0, 200)}）` : ''}`);
+  check(moved < 1, `身体没自己跑去找空气（挪了 ${moved.toFixed(1)} 格）`);
+  await rcon(`kill @e[type=pig,x=${P.x},y=${P.y},z=${P.z},distance=..3]`);
+  await rcon(`fill ${P.x - 1} ${P.y - 1} ${P.z - 1} ${P.x + 1} ${P.y + 2} ${P.z + 1} air`);
 }
 
 /** 图纸里每块方块在世界里是不是对的（用 RCON 的 execute if block 逐块问）：返回不对的那些 */
@@ -974,6 +1006,7 @@ async function main(): Promise<void> {
     await sleep(2000);
     if (SUITE === 'all' || SUITE === 'basic') await basicCases();
     if (SUITE === 'all' || SUITE === 'edge') await edgeCases();
+    if (SUITE === 'breath') await breathCases();
     if (SUITE === 'all' || SUITE === 'build') await buildCases();
     if (SUITE === 'all' || SUITE === 'farm') await farmCases();
     if (SUITE === 'all' || SUITE === 'journal') await journalCases();

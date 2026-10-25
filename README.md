@@ -76,7 +76,7 @@ pnpm -C packages/dsh-game build
 - `tools/restart-dsh.sh`：重启本地开发用的 DSH 网页版（DSH 装在 `.runtime/`，数据目录 `.dsh-home/`，便携 Node 在 `tools/node/`，都不进 git）。
 - `tools/ddlc-snapshot.sh`：测试前后保存和恢复《心跳文学部》的游戏状态。
 - `tools/mc-server.mjs`：本地开发用的 Minecraft 服务器（`start` / `stop` / `status` / `cmd <命令>`，服务器文件在 `.mc-server/`，不进 git）。
-- `tools/mc-selftest.mjs`：Minecraft 生存自测。一个测试玩家在空中的测试场地里把基本操作、各种边界情况、盖房子、种地养动物、世界日志、下界传送门和创造模式走一遍，每一步核对结果、数量、报给她的背包变化和服务器里的真实背包，盖房子逐块核对方块和朝向、查脚手架拆没拆干净（`basic` / `edge` / `build` / `farm` / `journal` / `nether` / `creative` / 不填 = 全部，大约 30 分钟）。改了身体就跑一遍。
+- `tools/mc-selftest.mjs`：Minecraft 生存自测。一个测试玩家在空中的测试场地里把基本操作、各种边界情况（含旁边生物憋气时她的氧气不受影响）、盖房子、种地养动物、世界日志、下界传送门和创造模式走一遍，每一步核对结果、数量、报给她的背包变化和服务器里的真实背包，盖房子逐块核对方块和朝向、查脚手架拆没拆干净（`basic` / `edge` / `build` / `farm` / `journal` / `nether` / `creative` / 不填 = 全部，大约 30 分钟；`breath` 只跑氧气那一项）。改了身体就跑一遍。
 
 ## 许可与致谢
 
