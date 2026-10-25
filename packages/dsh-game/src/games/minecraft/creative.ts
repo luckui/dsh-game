@@ -97,6 +97,7 @@ export async function placeLayers(
           if (filled) placed += Number(filled[1]);
           else if (/Changed the block|已更改/i.test(reply)) placed += 1;
           else if (/Could not set the block|No blocks were filled|没有方块被填充|无法放置/i.test(reply)) { /* 本来就是这个方块 */ }
+          else if (!reply.trim()) { /* 服务器偶尔不回话（多半是放上了）：不算放不上 */ }
           else if (failed.length < 5) failed.push(`${batch[j].split(' ').slice(0, 4).join(' ')}: ${reply.trim() || 'no reply'}`);
         });
       }

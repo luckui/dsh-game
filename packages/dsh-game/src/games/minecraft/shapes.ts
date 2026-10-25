@@ -34,7 +34,7 @@ const POOL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789#@$%
 export function isShapeText(text: string): boolean {
   const first = text.replace(/\r/g, '').split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('```') && !l.startsWith('//'));
   if (!first) return false;
-  return /^materials\s*[:：]/i.test(first) || new RegExp(`^(cut\\s+)?(${KINDS.join('|')})\\b`, 'i').test(first);
+  return /^(materials|材料)\s*[:：]/i.test(first) || new RegExp(`^(cut\\s+)?(${KINDS.join('|')})\\b`, 'i').test(first);
 }
 
 interface Shape {
@@ -227,7 +227,7 @@ export function parseShapes(text: string, lookup: (name: string) => Blueprint | 
   let budget = SHAPE_LIMITS.blocks * 4;
 
   for (const line of lines) {
-    const mats = line.match(/^materials\s*[:：]\s*(.*)$/i);
+    const mats = line.match(/^(?:materials|材料)\s*[:：]\s*(.*)$/i);
     if (mats) {
       for (const pair of mats[1].split(/\s+/).filter(Boolean)) {
         const m = pair.match(/^([^=\s]+)=(.+)$/);

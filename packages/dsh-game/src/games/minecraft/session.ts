@@ -175,7 +175,7 @@ export class MinecraftSession implements GameSession {
   /** 选好的地方：图纸名 → 坐标和那里的虚影（草稿）。改同名图纸虚影跟着变；build 不写坐标就盖在这里 */
   private sites = new Map<string, { origin: { x: number; y: number; z: number }; ghost: GhostBuild | null }>();
   /** 导播：摄像机离开她，绕着草稿 / 正在盖的建筑慢慢转（她去做别的事、盖完一会儿、太久没动静就回到她身上） */
-  private director: { timer: NodeJS.Timeout; until: number } | null = null;
+  private director: { timer: NodeJS.Timeout; until: number; center: { x: number; y: number; z: number } } | null = null;
   /** 图纸渲染图用的方块颜色（没装客户端就是 null） */
   private colors: BlockColors | null | undefined;
   /** 刚做完的那件事附带的图（game_act 取走） */
@@ -321,8 +321,9 @@ export class MinecraftSession implements GameSession {
     const name = action.name?.trim().toLowerCase().replace(/^minecraft:/, '').replace(/\s+/g, '_') ?? '';
     const count = Math.max(1, Math.min(64, Math.round(action.index ?? 1)));
     const xyz = parseXyz(action.text) ?? (action.action === 'build' ? this.sites.get(action.name?.trim() ?? '')?.origin ?? null : null);
-    // 去做别的事了：摄像机回到她身上
-    if (!['design', 'template', 'view', 'site', 'build', 'look', 'journal', 'mark', 'goal', 'chat'].includes(action.action)) this.stopDirecting();
+    // 去做别的事了：摄像机回到她身上（飞到草稿附近看它不算：离草稿 64 格以内的 go 摄像机接着拍草稿）
+    const nearDraft = action.action === 'go' && !!xyz && !!this.director && Math.hypot(xyz.x - this.director.center.x, xyz.z - this.director.center.z) <= 64;
+    if (!nearDraft && !['design', 'template', 'view', 'site', 'build', 'look', 'journal', 'mark', 'goal', 'chat'].includes(action.action)) this.stopDirecting();
     switch (action.action) {
       case 'goal':
         this.goal = action.text!.trim();
@@ -574,7 +575,7 @@ export class MinecraftSession implements GameSession {
       void rcon(target, `tp ${this.cameraName} ${x.toFixed(2)} ${(center.y + lift).toFixed(2)} ${z.toFixed(2)} facing ${center.x.toFixed(2)} ${center.y.toFixed(2)} ${center.z.toFixed(2)}`).catch(() => {});
     };
     // 太久没动静（3 分钟）就回到她身上；盖的时候盖完再延
-    this.director = { timer: setInterval(step, 200), until: Date.now() + 180_000 };
+    this.director = { timer: setInterval(step, 200), until: Date.now() + 180_000, center };
     step();
   }
 
