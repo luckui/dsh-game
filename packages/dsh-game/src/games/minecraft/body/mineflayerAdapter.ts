@@ -3602,20 +3602,71 @@ async function collectNearbyDrops(bot: any, radius: number, signal?: AbortSignal
   return picked;
 }
 
+/**
+ * 走到捡得到这个掉落物的地方：原版里物品碰到玩家身体往外扩一格（上下半格）的范围就吸过来，不用站到它上面
+ * （这里每边少算一点余量）。以前的目标是「站到它那里」：东西挂在矿道里还没挖的那格上面时，寻路器会把矿道顶挖开、
+ * 爬上去站，人就钻进了石头里；掉在耕地这类不满一格的方块上时，往下取整落进方块里，寻路器会把耕地挖掉
+ */
+/**
+ * 掉落物会停在哪：身体记的位置常常还是它刚掉出来时的高度（掉进刚挖的坑里，实际已经落到坑底了）。
+ * 它所在的那格是空的、下面一格是实心的，就当它已经落到这一格的底上
+ */
+function restingAt(bot: any, p: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+  const cell = Math.floor(p.y);
+  const here = bot.blockAt?.(new Vec3(p.x, cell, p.z));
+  const below = bot.blockAt?.(new Vec3(p.x, cell - 1, p.z));
+  return here?.boundingBox === 'empty' && below?.boundingBox === 'block' ? { x: p.x, y: cell, z: p.z } : p;
+}
+
+async function gotoWithin(bot: any, goal: any, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      bot.pathfinder.goto(goal).then(() => true, () => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => {
+          try { bot.pathfinder.setGoal(null); } catch { /* 已经停了 */ }
+          resolve(false);
+        }, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+class GoalPickup extends goals.Goal {
+  constructor(private readonly at: { x: number; y: number; z: number }) {
+    super();
+  }
+
+  heuristic(node: any): number {
+    return Math.hypot(node.x + 0.5 - this.at.x, node.y - this.at.y, node.z + 0.5 - this.at.z);
+  }
+
+  isEnd(node: any): boolean {
+    return Math.abs(node.x + 0.5 - this.at.x) <= 1.2
+      && Math.abs(node.z + 0.5 - this.at.z) <= 1.2
+      && this.at.y >= node.y - 0.6
+      && this.at.y <= node.y + 2.0;
+  }
+}
+
 async function walkPickupDrops(
   bot: any,
   radius: number,
   signal?: AbortSignal,
 ): Promise<{ found: number; picked: number; inventoryDelta: Record<string, number> }> {
   const before = inventoryCounts(bot);
-  const attempted = new Set<string>();
+  // 每个掉落物最多走两趟：第一趟时它可能还在往下掉（落进刚挖的坑里），落定以后再按新位置走一趟
+  const attempts = new Map<string, number>();
   let picked = 0;
   let found = 0;
   let rescanned = false;
   for (let index = 0; index < 32; index += 1) {
     throwIfAborted(signal);
     const item = matchingEntities(bot, 'item', radius).find(
-      (candidate) => !attempted.has(entityKey(candidate)),
+      (candidate) => (attempts.get(entityKey(candidate)) ?? 0) < 2,
     );
     if (!item) {
       // 刚挖掉、刚打死的东西可能还没掉出来：再等一下看一次
@@ -3624,14 +3675,11 @@ async function walkPickupDrops(
       await delay(800, signal);
       continue;
     }
-    found += 1;
-    attempted.add(entityKey(item));
-    try {
-      // 抬半格：掉在耕地、灵魂沙这类不满一格的方块上时，往下取整会落到方块里面，寻路器会把它挖掉
-      await bot.pathfinder.goto(new goals.GoalNear(item.position.x, item.position.y + 0.5, item.position.z, 0.8));
-    } catch {
-      continue;
-    }
+    const tries = attempts.get(entityKey(item)) ?? 0;
+    if (!tries) found += 1;
+    attempts.set(entityKey(item), tries + 1);
+    // 走不过去的（寻路器找不到路时会一直挂着，不报错）8 秒就算了，不让捡东西卡住整个动作
+    if (!(await gotoWithin(bot, new GoalPickup(restingAt(bot, item.position)), 8_000))) continue;
     if (await waitForItemPickup(bot, item, signal)) picked += 1;
   }
   return { found, picked, inventoryDelta: inventoryDifference(before, inventoryCounts(bot)) };

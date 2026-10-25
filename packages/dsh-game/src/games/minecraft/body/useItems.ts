@@ -49,6 +49,24 @@ const isSource = (b: any) => !!b && (b.name === 'water' || b.name === 'lava') &&
 const solid = (b: any) => !!b && b.boundingBox === 'block';
 const inNether = (bot: any) => String(bot.game?.dimension ?? '').includes('nether');
 
+const SEE_THROUGH = new Set(['air', 'cave_air', 'void_air', 'water']);
+
+/** 从她眼睛到 aim 的视线上，除了 allowed 这几格，有没有不是空气的东西（庄稼、草这类没碰撞箱的也算） */
+function lineClear(bot: any, aim: Vec3, allowed: Vec3[]): boolean {
+  const eye = bot.entity.position.offset(0, bot.entity.eyeHeight ?? 1.62, 0);
+  const d = aim.minus(eye);
+  const len = d.norm();
+  const skip = new Set(allowed.map(fmt));
+  for (let t = 0; t < len; t += 0.05) {
+    const p = eye.plus(d.scaled(t / len)).floored();
+    if (skip.has(fmt(p))) continue;
+    const name = bot.blockAt(p)?.name;
+    // 水挡不住：倒水时服务器的视线穿过液体
+    if (name && !SEE_THROUGH.has(name)) return false;
+  }
+  return true;
+}
+
 /** 走到够得着的地方（4 格内，看得到那一格） */
 async function reach(bot: any, target: Vec3, signal: AbortSignal): Promise<void> {
   if (bot.entity.position.offset(0, 1.6, 0).distanceTo(target.offset(0.5, 0.5, 0.5)) <= 4) return;
@@ -104,9 +122,18 @@ export async function useBucket(bot: any, req: { item: string; position: { x: nu
     // 倒：那一格要空着；对着它旁边一个实心方块朝它的那一面用
     if (solid(block)) return result(started, before, bot, 'failed', `${fmt(target)} is ${block.name}; pour into an empty cell`, 'blocked');
     const liquid = LIQUID_OF[req.item];
-    const face = Object.entries(SIDES).map(([, d]) => ({ against: target.minus(d), d })).find((f) => solid(bot.blockAt(f.against)));
-    if (!face) return result(started, before, bot, 'failed', `nothing solid next to ${fmt(target)} to pour against`, 'blocked');
-    await bot.lookAt(face.against.offset(0.5 + face.d.x * 0.5, 0.5 + face.d.y * 0.5, 0.5 + face.d.z * 0.5), true);
+    const faces = Object.entries(SIDES).map(([, d]) => ({ against: target.minus(d), d })).filter((f) => solid(bot.blockAt(f.against)));
+    if (!faces.length) return result(started, before, bot, 'failed', `nothing solid next to ${fmt(target)} to pour against`, 'blocked');
+    const aimOf = (f: { against: Vec3; d: Vec3 }) => f.against.offset(0.5 + f.d.x * 0.5, 0.5 + f.d.y * 0.5, 0.5 + f.d.z * 0.5);
+    // 视线上不能有别的东西：服务器按她的视线找倒在哪，庄稼、草、火把没有碰撞箱但挡视线，水会倒进那一格（冲掉庄稼）。
+    // 哪个面都被挡着：走到那一格旁边再挑一次
+    let face = faces.find((f) => lineClear(bot, aimOf(f), [target, f.against]));
+    if (!face) {
+      const r = await patchedGoto(bot, new goals.GoalNear(target.x, target.y + 1, target.z, 1), { signal: req.signal });
+      if (r.ok) face = faces.find((f) => lineClear(bot, aimOf(f), [target, f.against]));
+    }
+    if (!face) return result(started, before, bot, 'failed', `could not get a clear line of sight into ${fmt(target)} (something like a crop or a torch is in the way)`, 'blocked');
+    await bot.lookAt(aimOf(face), true);
     await sleep(100);
     bot.activateItem();
     await sleep(1500);
