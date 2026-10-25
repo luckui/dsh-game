@@ -12,10 +12,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { MinecraftSession } from '../src/games/minecraft/session.js';
-import { rcon as rconRaw, type RconTarget } from '../src/games/minecraft/rcon.js';
+import { RconLink, rcon as rconRaw, type RconTarget } from '../src/games/minecraft/rcon.js';
 
 const ROOT = path.resolve(process.argv[2] ?? '.');
-/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量、氧气只算自己的；breath 只跑氧气这项）、build（盖房子）、farm（种地、养动物）、journal（世界日志）、nether（桶、黑曜石、下界传送门）、creative（形状图纸、创造模式一层层盖）、不填 = 全部 */
+/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量、氧气只算自己的；breath 只跑氧气这项）、build（盖房子）、farm（种地、养动物）、journal（世界日志）、nether（桶、黑曜石、下界传送门）、creative（形状图纸、创造模式一层层盖）、rcon（跟拍用的常开 RCON 连接：连发的命令每条都执行）、不填 = 全部 */
 const SUITE = process.argv[3] ?? 'all';
 const props = Object.fromEntries(
   fs.readFileSync(path.join(ROOT, '.mc-server', 'server.properties'), 'utf8').split(/\r?\n/)
@@ -352,6 +352,41 @@ async function breathCases(): Promise<void> {
   check(moved < 1, `身体没自己跑去找空气（挪了 ${moved.toFixed(1)} 格）`);
   await rcon(`kill @e[type=pig,x=${P.x},y=${P.y},z=${P.z},distance=..3]`);
   await rcon(`fill ${P.x - 1} ${P.y - 1} ${P.z - 1} ${P.x + 1} ${P.y + 2} ${P.z + 1} air`);
+}
+
+/**
+ * 跟拍用的常开 RCON 连接（RconLink）：同一个事件循环里连发的命令（换机位就是 kill + summon + spectate 连着发）每条都要执行。
+ * 原版 RCON 一次读只处理一个包，几条被合进同一个 TCP 段就一条都不执行、还断开连接；本机上也复现得出来
+ */
+async function rconCases(): Promise<void> {
+  const tag = 'dsh_linktest';
+  const count = async () => Number((await rcon(`execute if entity @e[tag=${tag}]`)).match(/count: (\d+)/)?.[1] ?? 0);
+  const summon = `summon item_display ${X} ${Y + 10} ${Z} {Tags:["${tag}"]}`;
+  await rcon(`kill @e[tag=${tag}]`);
+  const link = new RconLink(RCON);
+  try {
+    begin('RCON 常连接：还没连上时连发 3 条');
+    for (let i = 0; i < 3; i++) link.send(summon);
+    await sleep(1500);
+    check((await count()) === 3, `3 条都执行了（${await count()}）`);
+
+    begin('RCON 常连接：连上以后同一个循环里连发 3 条');
+    for (let i = 0; i < 3; i++) link.send(summon);
+    await sleep(1500);
+    check((await count()) === 6, `一共 6 个（${await count()}）`);
+
+    begin('RCON 常连接：每 0.1 秒一条 tp 连续 3 秒，再 kill');
+    for (let i = 0; i < 30; i++) {
+      link.send(`tp @e[tag=${tag}] ${X} ${Y + 10 + i * 0.1} ${Z}`);
+      await sleep(100);
+    }
+    link.send(`kill @e[tag=${tag}]`);
+    await sleep(1500);
+    check((await count()) === 0, `连接没断，kill 也执行了（还剩 ${await count()}）`);
+  } finally {
+    link.close();
+    await rcon(`kill @e[tag=${tag}]`);
+  }
 }
 
 /** 图纸里每块方块在世界里是不是对的（用 RCON 的 execute if block 逐块问）：返回不对的那些 */
@@ -1007,6 +1042,7 @@ async function main(): Promise<void> {
     if (SUITE === 'all' || SUITE === 'basic') await basicCases();
     if (SUITE === 'all' || SUITE === 'edge') await edgeCases();
     if (SUITE === 'breath') await breathCases();
+    if (SUITE === 'all' || SUITE === 'rcon') await rconCases();
     if (SUITE === 'all' || SUITE === 'build') await buildCases();
     if (SUITE === 'all' || SUITE === 'farm') await farmCases();
     if (SUITE === 'all' || SUITE === 'journal') await journalCases();

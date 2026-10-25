@@ -682,6 +682,13 @@ export class MinecraftSession implements GameSession {
     clearInterval(this.director.timer);
     this.director = null;
     const target = this.options.rcon;
+    // 跟拍：导播一直在她附近拍，那一片早就加载好了；下一步跟拍直接在机位上换一个镜头实体挂上，一下切过去
+    if (target && this.view === 'follow') {
+      this.followRig = null;
+      this.followReset = true;
+      this.followPausedUntil = 0;
+      return;
+    }
     if (target) void rconBatch(target, [`execute as ${this.cameraName} run spectate`, 'kill @e[type=item_display,tag=dsh_cam]']).catch(() => {}).then(() => this.reattachCamera());
     else void this.reattachCamera();
   }
@@ -1020,8 +1027,11 @@ export class MinecraftSession implements GameSession {
       if (!(await this.pressF5('first'))) return '没能给摄像机窗口发按键。';
       this.followReset = true;
     } else {
-      // 从跟拍切回原版：摄像机先回到她身上
-      if (this.view === 'follow' && !this.director) void this.reattachCamera();
+      // 从跟拍切回原版：收掉镜头实体，摄像机直接挂回她身上（就在旁边，不用重新加载）
+      if (this.view === 'follow' && !this.director && this.options.rcon) {
+        this.followRig = null;
+        void rconBatch(this.options.rcon, ['kill @e[type=item_display,tag=dsh_cam]', `spectate ${this.options.username} ${this.cameraName}`]).catch(() => {});
+      }
       if (!(await this.pressF5(view))) return '没能给摄像机窗口发按键。';
     }
     this.view = view;
@@ -1071,6 +1081,8 @@ export class MinecraftSession implements GameSession {
         link.send(`execute at ${this.options.username} run summon item_display ${xyz} {teleport_duration:3,Rotation:[${pose.yaw.toFixed(1)}f,${pose.pitch.toFixed(1)}f],Tags:["dsh_cam"]}`);
         link.send(`spectate @e[type=item_display,tag=dsh_cam,limit=1] ${cam}`);
       } else {
+        // 上一条还没回来（远程服务器慢）：这一步不发，排着的旧位置没用，下一步发最新的
+        if (link.backlog > 0) return;
         link.send(`tp @e[type=item_display,tag=dsh_cam,limit=1] ${xyz} ${pose.yaw.toFixed(1)} ${pose.pitch.toFixed(1)}`);
       }
       this.followRig = { x: pose.x, y: pose.y, z: pose.z };
@@ -1088,20 +1100,33 @@ export class MinecraftSession implements GameSession {
     this.followPausedUntil = Date.now() + 8000;
   }
 
-  /** 摄像机重新挂一次：先放开，传送到她身边，等客户端加载好周围，再挂上 */
+  /**
+   * 摄像机重新挂一次（她一下子跑远了、换了维度、复活）：先放开，传送过去，等客户端加载好周围，再挂上。
+   * 跟拍时传送到跟拍的机位上（朝向也对好），加载完在那里放镜头实体挂上；不跟拍、或者她那里放不下镜头，就传送到她身上、挂到她身上
+   * （传送到她身上的那一下，镜头在她身体里面，画面上是她的脸：跟拍时尽量不走这条）
+   */
   private async reattachCamera(): Promise<void> {
     const target = this.options.rcon;
     if (!target || !this.cameraSeen) return;
     this.lastCameraCheck = Date.now();
-    // 跟拍的镜头实体先收掉，等摄像机在她身边加载好了再放（导播的不动：导播放手时自己收）
-    const dropRig = this.view === 'follow' && !this.director;
-    if (dropRig) {
+    // 跟拍的镜头实体先收掉，等摄像机加载好了再放（导播的不动：导播放手时自己收）
+    const follow = this.view === 'follow' && !this.director;
+    let pose: FollowPose | null = null;
+    if (follow) {
       this.followRig = null;
-      this.followReset = true;
-      this.followPausedUntil = Date.now() + 4000;
+      this.followReset = false;
+      this.followPausedUntil = Date.now() + 60_000;
+      pose = (await this.runtime?.command<FollowPose | null>('follow-cam', { reset: true }, 1000).catch(() => null)) ?? null;
     }
-    await rconBatch(target, [`execute as ${this.cameraName} run spectate`, ...(dropRig ? ['kill @e[type=item_display,tag=dsh_cam]'] : []), `tp ${this.cameraName} ${this.options.username}`]).catch(() => {});
+    const spot = pose && !pose.first ? pose : null;
+    const place = spot
+      ? `execute at ${this.options.username} run tp ${this.cameraName} ${spot.x.toFixed(2)} ${spot.y.toFixed(2)} ${spot.z.toFixed(2)} ${spot.yaw.toFixed(1)} ${spot.pitch.toFixed(1)}`
+      : `tp ${this.cameraName} ${this.options.username}`;
+    await rconBatch(target, [`execute as ${this.cameraName} run spectate`, ...(follow ? ['kill @e[type=item_display,tag=dsh_cam]'] : []), place]).catch(() => {});
     await new Promise((r) => setTimeout(r, 1500));
+    if (follow) this.followPausedUntil = 0;
+    // 跟拍：下一步在摄像机现在的地方放镜头实体挂上
+    if (spot) return;
     await rcon(target, `spectate ${this.options.username} ${this.cameraName}`).catch(() => {});
   }
 

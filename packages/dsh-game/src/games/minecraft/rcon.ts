@@ -62,43 +62,65 @@ export function rconBatch(target: RconTarget, commands: string[], timeoutMs = 50
 }
 
 /**
- * 一直开着的 RCON 连接，只管发、不等回音（跟拍镜头一秒十来条 tp）。
- * 每条新开一个连接的话，服务器每次都往日志里写两行「RCON Client 开了 / 关了」，远程服务器上每条还要多等一次握手；
- * 断了就丢掉，下次发的时候重连（连上之前最多攒几条，旧的丢掉：镜头只要最新的位置）
+ * 一直开着的 RCON 连接（跟拍镜头一秒十来条 tp）：每条新开一个连接的话，服务器每次都往日志里写两行「RCON Client 开了 / 关了」，
+ * 远程服务器上每条还要多等一次握手。
+ * 一次只有一条在路上：写一条、等到同一个编号的回复再写下一条。原版 RCON 一次读只处理一个包，几条命令被合进同一个 TCP 段，
+ * 它一条都不执行、直接断开（跟拍换机位要连着发 kill + summon + spectate，合包以后镜头实体再也放不出来）。
+ * 5 秒没回音就当连接坏了，断掉重连；排着的命令连上以后接着发
  */
 export class RconLink {
   private sock: net.Socket | null = null;
   private ready = false;
-  private pending: string[] = [];
+  private queue: string[] = [];
+  private inFlight: { id: number; timer: ReturnType<typeof setTimeout> } | null = null;
   private seq = 10;
   /** 密码不对：不再重连 */
   private refused = false;
+  private retry: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly target: RconTarget) {}
 
+  /** 还没回来的条数（发出去没回复的 + 排着的）：跟拍看它决定这一步要不要再发 tp（排着的旧位置没用） */
+  get backlog(): number {
+    return this.queue.length + (this.inFlight ? 1 : 0);
+  }
+
   send(command: string): void {
-    if (this.ready && this.sock) {
-      this.sock.write(packet(++this.seq, 2, command));
-      return;
-    }
     if (this.refused) return;
-    this.pending.push(command);
-    if (this.pending.length > 8) this.pending.shift();
-    if (!this.sock) this.open();
+    this.queue.push(command);
+    if (this.queue.length > 32) this.queue.shift();
+    this.pump();
   }
 
   close(): void {
+    if (this.inFlight) clearTimeout(this.inFlight.timer);
+    if (this.retry) clearTimeout(this.retry);
+    this.inFlight = null;
+    this.retry = null;
+    this.queue = [];
     this.sock?.destroy();
     this.sock = null;
     this.ready = false;
-    this.pending = [];
+  }
+
+  private pump(): void {
+    if (!this.sock) {
+      if (!this.retry) this.open();
+      return;
+    }
+    if (!this.ready || this.inFlight || !this.queue.length) return;
+    const sock = this.sock;
+    const id = ++this.seq;
+    const timer = setTimeout(() => { if (this.inFlight?.id === id) sock.destroy(); }, 5000);
+    this.inFlight = { id, timer };
+    sock.write(packet(id, 2, this.queue.shift()!));
   }
 
   private open(): void {
     const sock = net.connect(this.target.port, this.target.host);
     this.sock = sock;
     let data = Buffer.alloc(0);
-    // 3 秒还没握完手（服务器卡住、连接没回音）：丢掉，下次发的时候重连
+    // 3 秒还没握完手（服务器卡住、连接没回音）：丢掉重连
     const giveUp = setTimeout(() => { if (!this.ready && this.sock === sock) sock.destroy(); }, 3000);
     sock.on('connect', () => sock.write(packet(1, 3, this.target.password)));
     sock.on('data', (chunk) => {
@@ -106,19 +128,30 @@ export class RconLink {
       while (data.length >= 4 && data.length >= data.readInt32LE(0) + 4) {
         const id = data.readInt32LE(4);
         data = data.subarray(4 + data.readInt32LE(0));
-        if (this.ready || this.sock !== sock) continue;
-        clearTimeout(giveUp);
-        if (id === -1) { this.refused = true; sock.destroy(); continue; }
-        this.ready = true;
-        for (const command of this.pending.splice(0)) sock.write(packet(++this.seq, 2, command));
+        if (this.sock !== sock) continue;
+        if (!this.ready) {
+          clearTimeout(giveUp);
+          if (id === -1) { this.refused = true; this.queue = []; sock.destroy(); continue; }
+          this.ready = true;
+        } else if (this.inFlight?.id === id) {
+          clearTimeout(this.inFlight.timer);
+          this.inFlight = null;
+        }
+        this.pump();
       }
     });
     sock.on('error', () => {});
     sock.on('close', () => {
       clearTimeout(giveUp);
       if (this.sock !== sock) return;
+      if (this.inFlight) clearTimeout(this.inFlight.timer);
+      this.inFlight = null;
       this.sock = null;
       this.ready = false;
+      // 还有没发的：隔 1 秒重连（服务器重启时不一直猛连）
+      if (this.queue.length && !this.refused) {
+        this.retry = setTimeout(() => { this.retry = null; this.pump(); }, 1000);
+      }
     });
   }
 }
