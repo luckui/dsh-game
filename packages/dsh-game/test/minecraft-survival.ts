@@ -585,6 +585,19 @@ async function farmCases(): Promise<void> {
   await sleep(800);
   await step('shear', { index: 2 }, { ok: /：做完了/, atLeast: { white_wool: 2 } });
 
+  // 站在耕地上（15/16 高）挖旁边一格：土落在坑底，寻路器按格子往下取整会以为够得着、一步不动（以前一半会捡不到）
+  begin('耕地上挖坑：土掉在坑底也要捡回来（连做 3 遍）');
+  for (let i = 0; i < 3; i++) {
+    await rcon(`setblock ${X + 5} ${Y} ${Z + 4} dirt`);
+    await rcon(`kill @e[type=item,x=${X + 5},y=${Y},z=${Z + 4},distance=..3]`);
+    await rcon(`tp ${NAME} ${X + 4.5} ${Y + 1} ${Z + 3.5}`);
+    await sleep(1000);
+    const before = await serverCount('dirt');
+    const line = await act('dig', { text: `${X + 5} ${Y} ${Z + 4}` }, 60_000);
+    check((await serverCount('dirt')) === before + 1, `第 ${i + 1} 遍：土捡回来了（${line.slice(0, 80)}）`);
+  }
+  await rcon(`setblock ${X + 5} ${Y} ${Z + 4} dirt`);
+
   begin('挖坑引水：dig 挖掉指定那一格，再倒水（胡萝卜地旁边）');
   await rcon(`give ${NAME} water_bucket 1`);
   await sleep(800);

@@ -3602,22 +3602,6 @@ async function collectNearbyDrops(bot: any, radius: number, signal?: AbortSignal
   return picked;
 }
 
-/**
- * 走到捡得到这个掉落物的地方：原版里物品碰到玩家身体往外扩一格（上下半格）的范围就吸过来，不用站到它上面
- * （这里每边少算一点余量）。以前的目标是「站到它那里」：东西挂在矿道里还没挖的那格上面时，寻路器会把矿道顶挖开、
- * 爬上去站，人就钻进了石头里；掉在耕地这类不满一格的方块上时，往下取整落进方块里，寻路器会把耕地挖掉
- */
-/**
- * 掉落物会停在哪：身体记的位置常常还是它刚掉出来时的高度（掉进刚挖的坑里，实际已经落到坑底了）。
- * 它所在的那格是空的、下面一格是实心的，就当它已经落到这一格的底上
- */
-function restingAt(bot: any, p: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
-  const cell = Math.floor(p.y);
-  const here = bot.blockAt?.(new Vec3(p.x, cell, p.z));
-  const below = bot.blockAt?.(new Vec3(p.x, cell - 1, p.z));
-  return here?.boundingBox === 'empty' && below?.boundingBox === 'block' ? { x: p.x, y: cell, z: p.z } : p;
-}
-
 async function gotoWithin(bot: any, goal: any, ms: number): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -3635,8 +3619,18 @@ async function gotoWithin(bot: any, goal: any, ms: number): Promise<boolean> {
   }
 }
 
+/**
+ * 走到捡得到这个掉落物的地方：原版里物品碰到玩家身体往外扩一格（上下半格）的范围就吸过来，不用站到它上面
+ * （这里每边少算一点余量）。以前的目标是「站到它那里」：东西挂在矿道里还没挖的那格上面时，寻路器会把矿道顶挖开、
+ * 爬上去站，人就钻进了石头里。
+ * 高度按她的脚实际在哪算：站在耕地、土径、灵魂沙、下半砖这类不满一格的方块上，寻路器的格子往下取整，
+ * 脚其实高了将近一格（耕地上差 15/16）；不算上的话，她站在耕地上就以为够得着坑底的土，一步不动，土吸不过来
+ */
 class GoalPickup extends goals.Goal {
-  constructor(private readonly at: { x: number; y: number; z: number }) {
+  constructor(
+    private readonly bot: any,
+    private readonly at: { x: number; y: number; z: number },
+  ) {
     super();
   }
 
@@ -3645,11 +3639,19 @@ class GoalPickup extends goals.Goal {
   }
 
   isEnd(node: any): boolean {
+    const feet = node.y + partialHeight(this.bot.blockAt?.(new Vec3(node.x, node.y, node.z)));
     return Math.abs(node.x + 0.5 - this.at.x) <= 1.2
       && Math.abs(node.z + 0.5 - this.at.z) <= 1.2
-      && this.at.y >= node.y - 0.6
-      && this.at.y <= node.y + 2.0;
+      && this.at.y >= feet - 0.6
+      && this.at.y <= feet + 2.0;
   }
+}
+
+/** 这一格里站得上去的不满一格的方块有多高（耕地 15/16、下半砖 1/2）；空的、满格的都是 0 */
+function partialHeight(block: any): number {
+  if (!block || block.boundingBox !== 'block') return 0;
+  const top = Math.max(0, ...((block.shapes ?? []) as number[][]).map((s) => s[4]));
+  return top > 0 && top < 1 ? top : 0;
 }
 
 async function walkPickupDrops(
@@ -3679,7 +3681,7 @@ async function walkPickupDrops(
     if (!tries) found += 1;
     attempts.set(entityKey(item), tries + 1);
     // 走不过去的（寻路器找不到路时会一直挂着，不报错）8 秒就算了，不让捡东西卡住整个动作
-    if (!(await gotoWithin(bot, new GoalPickup(restingAt(bot, item.position)), 8_000))) continue;
+    if (!(await gotoWithin(bot, new GoalPickup(bot, item.position), 8_000))) continue;
     if (await waitForItemPickup(bot, item, signal)) picked += 1;
   }
   return { found, picked, inventoryDelta: inventoryDifference(before, inventoryCounts(bot)) };
