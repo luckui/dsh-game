@@ -749,6 +749,11 @@ async function creativeCases(): Promise<void> {
   const b = cellsOf(r.blueprint!);
   check(b.has('1,1,1') && b.has('2,2,1') && b.size === 29, `blueprint 引用放对了（${b.size} 块）`);
 
+  begin('形状：宽松的写法（cut 带了材料、materials 里定义空气）也读得懂');
+  r = parseShapes('materials: S=stone air=air Z=air\nbox S from 0 0 0 to 4 3 4\ncut box air from 1 1 1 to 3 2 3\nbox Z from 0 3 0 to 0 3 0', none);
+  const loose = r.blueprint ? cellsOf(r.blueprint) : new Set<string>();
+  check(!!r.blueprint && !loose.has('2,1,2') && loose.has('0,0,0') && r.blueprint.layers[3][0][0] === '.', `读得懂（${r.errors.join('；') || '没报错'}）`);
+
   begin('形状：写错了会说清楚');
   for (const [text, want] of [['sphere Q center 0 0', /center/], ['sphere Z center 0 0 0 radius 2', /materials/], ['box stone from 0 0 0 to 300 1 1', /太大/], ['torus stone center 0 0 0', /box/], ['blueprint 没有的 at 0 0 0', /没有叫/]] as [string, RegExp][]) {
     const e = parseShapes(text, none);
@@ -788,6 +793,22 @@ async function creativeCases(): Promise<void> {
   check(await is(0, 5, 0, 'air') && await is(0, 9, 0, 'air') && await is(0, 2, -5, 'air'), '塔里面、穹顶里面、门洞是空的');
   const ghosts = Number((await rcon('execute if entity @e[type=block_display,tag=dsh_ghost]')).match(/count:\s*(\d+)/i)?.[1] ?? 0);
   check(ghosts === 0, `虚影撤干净了（还剩 ${ghosts}）`);
+
+  begin('创造模式：go 飞过去（从有顶的小屋里出发：先走出门再起飞；飞到天上，再飞回平台）');
+  // 一块平台，上面一间有顶的玻璃小屋，南面开门
+  const P = { x: C.x - 20, y: C.y, z: C.z };
+  await rcon(`fill ${P.x - 4} ${P.y - 1} ${P.z - 4} ${P.x + 4} ${P.y - 1} ${P.z + 6} stone`);
+  await rcon(`fill ${P.x - 2} ${P.y} ${P.z - 2} ${P.x + 2} ${P.y + 3} ${P.z + 2} glass hollow`);
+  await rcon(`fill ${P.x} ${P.y} ${P.z + 2} ${P.x} ${P.y + 1} ${P.z + 2} air`);
+  await rcon(`tp ${NAME} ${P.x + 0.5} ${P.y} ${P.z + 0.5}`);
+  await sleep(2000);
+  const sky = { x: P.x + 6, y: P.y + 25, z: P.z + 10 };
+  const flew = await act('go', { text: `${sky.x} ${sky.y} ${sky.z}` }, 90_000);
+  const pos = (await body().command<any>('snapshot', {}, 10_000))?.body?.position;
+  note(`飞完在 ${pos ? `${pos.x.toFixed(1)} ${pos.y.toFixed(1)} ${pos.z.toFixed(1)}` : '不知道'}`);
+  check(/做完了/.test(flew) && !!pos && pos.y > P.y + 10, `从屋里出来飞上去了（${flew.slice(0, 100)}）`);
+  const back = await act('go', { text: `${P.x} ${P.y} ${P.z + 5}` }, 90_000);
+  check(/做完了/.test(back), `飞回平台了（${back.slice(0, 100)}）`);
 
   begin('创造模式：字符图的门上下两半都在');
   await session.act({ action: 'template', name: 'cabin' });

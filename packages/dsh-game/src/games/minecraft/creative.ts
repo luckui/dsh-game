@@ -6,7 +6,7 @@
  *   - 门这类两格高的：图上上下两格画同一个字符，下面放 half=lower，上面放 half=upper（setblock 不会自己长出另一半）
  *   - 图上的「.」放空气（清掉原来的东西），空格不动
  *   - 盖的范围先 forceload（离她远的那头区块可能没加载，放不上），盖完放开
- *   - 每层之间停一下：层数少停得久一点（看得出在长），整座最多一分钟左右
+ *   - 每层之间停一下：层数少停得久一点（看得出在长，十几层的房子大约十秒），整座最多一分钟左右
  */
 import type { Blueprint } from './blueprint.js';
 import { rconBatch, type RconTarget } from './rcon.js';
@@ -68,7 +68,7 @@ export async function placeLayers(
   const base = worldBase(bp, origin);
   const boxes = chunkBoxes(base.x, base.z, base.x + bp.width - 1, base.z + bp.depth - 1);
   await rconBatch(target, boxes.map(([a, b, c, d]) => `forceload add ${a} ${b} ${c} ${d}`), 15_000).catch(() => {});
-  const delay = Math.max(40, Math.min(300, Math.floor(45_000 / Math.max(1, bp.height))));
+  const delay = Math.max(60, Math.min(800, Math.floor(45_000 / Math.max(1, bp.height))));
   const failed: string[] = [];
   let placed = 0;
   let stopped = false;

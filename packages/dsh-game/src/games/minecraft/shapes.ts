@@ -64,6 +64,9 @@ function parseLine(line: string): { cut: boolean; kind: string; material: string
   } else if (!cut) {
     material = tokens[i] && !KEYS.has(tokens[i].toLowerCase()) ? tokens[i++] : null;
     if (!material) return `「${line}」：形状名后面写材料（materials 里的字母，或者方块名）`;
+  } else if (tokens[i] && !KEYS.has(tokens[i].toLowerCase()) && !/^-?\d/.test(tokens[i])) {
+    // cut 挖掉的地方不用材料：写了（比如 cut box air）也不碍事
+    i += 1;
   }
   const nums: Record<string, number[]> = {};
   const flags = new Set<string>();
@@ -215,6 +218,8 @@ export function parseShapes(text: string, lookup: (name: string) => Blueprint | 
   const errors: string[] = [];
   const warnings: string[] = [];
   const legend: Record<string, BlockSpec> = {};
+  /** materials 里定义成 air 的名字（Z=air）：用它就是清成空气 */
+  const airNames = new Set<string>(['air']);
   /** 格子 → 方块（specKey），'air' 是清成空气 */
   const cells = new Map<string, string>();
   const specs = new Map<string, BlockSpec>();
@@ -225,8 +230,9 @@ export function parseShapes(text: string, lookup: (name: string) => Blueprint | 
     const mats = line.match(/^materials\s*[:：]\s*(.*)$/i);
     if (mats) {
       for (const pair of mats[1].split(/\s+/).filter(Boolean)) {
-        const m = pair.match(/^(\S)=(.+)$/);
+        const m = pair.match(/^([^=\s]+)=(.+)$/);
         if (!m) { errors.push(`materials 里的「${pair}」看不懂（写成 Q=quartz_block）`); continue; }
+        if (m[2].toLowerCase() === 'air') { airNames.add(m[1]); continue; }
         const spec = specOf(m[2]);
         if (typeof spec === 'string') errors.push(spec);
         else legend[m[1]] = spec;
@@ -273,7 +279,7 @@ export function parseShapes(text: string, lookup: (name: string) => Blueprint | 
     let value: string | null = null;
     if (!cut) {
       const m = material!;
-      const spec = m.toLowerCase() === 'air' ? null : legend[m] ?? (m.length === 1 ? undefined : specOf(m));
+      const spec = airNames.has(m) || m.toLowerCase() === 'air' ? null : legend[m] ?? (m.length === 1 ? undefined : specOf(m));
       if (spec === undefined) { errors.push(`「${line}」：材料「${m}」不在 materials 里`); continue; }
       if (typeof spec === 'string') { errors.push(spec); continue; }
       if (spec) specs.set(specKey(spec), spec);
@@ -309,7 +315,7 @@ export function parseShapes(text: string, lookup: (name: string) => Blueprint | 
 
   // 字符：她在 materials 里起的字母优先，别的从字符池里挑
   const charOf = new Map<string, string>();
-  for (const [ch, spec] of Object.entries(legend)) if (ch !== '.' && ch !== ' ' && specs.has(specKey(spec)) && !charOf.has(specKey(spec))) charOf.set(specKey(spec), ch);
+  for (const [ch, spec] of Object.entries(legend)) if (ch.length === 1 && ch !== '.' && ch !== ' ' && specs.has(specKey(spec)) && !charOf.has(specKey(spec))) charOf.set(specKey(spec), ch);
   const used = new Set(charOf.values());
   const pool = [...POOL].filter((c) => !used.has(c));
   for (const key of specs.keys()) {

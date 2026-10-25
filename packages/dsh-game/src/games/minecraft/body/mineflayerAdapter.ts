@@ -19,6 +19,7 @@ import { fleeFromHostiles, hideUnderground, sleepInBed, swimToShore } from './su
 import { buildStructure } from './build.js';
 import { breedAnimals, farmPlot, harvestCrops, shearSheep } from './farming.js';
 import { digAt as digOne, useBucket, useOnBlock } from './useItems.js';
+import { flyTo, openSkySpots } from './flight.js';
 import { placeBlockAt as airiPlaceBlockAt, breakBlockAt, isInteractive, isReplaceableForPlacement, type PlaceFace } from './placeBlock.js';
 import { Vec3 } from 'vec3';
 import { runAdaptiveCollection } from './collectionStrategy.js';
@@ -2416,6 +2417,30 @@ export function createMineflayerAdapter(
 
     async navigateToPosition(position, options) {
       const current = requireBot(bot);
+      // 创造模式：远一点的地方飞过去（走路过不了海、上不了天上的房子）
+      if (current.game?.gameMode === 'creative' && current.entity.position.distanceTo(new Vec3(position.x, position.y, position.z)) > 3) {
+        const started = Date.now();
+        const from = current.entity.position.clone();
+        let flown = await flyTo(current, position, options.signal).catch((err: Error) => ({ ok: false, message: err.message }));
+        // 头顶被挡着（屋里、山洞、水下）：先走到附近头顶开阔的地方再飞
+        for (const spot of flown.ok ? [] : openSkySpots(current)) {
+          const walked = await patchedGoto(current, new goals.GoalBlock(spot.x, spot.y, spot.z), { signal: options.signal });
+          if (!walked.ok) continue;
+          flown = await flyTo(current, position, options.signal).catch((err: Error) => ({ ok: false, message: err.message }));
+          break;
+        }
+        if (flown.ok) {
+          const here = current.entity.position;
+          return {
+            ok: true, reason: 'success', message: flown.message,
+            startPos: { x: from.x, y: from.y, z: from.z }, endPos: { x: here.x, y: here.y, z: here.z },
+            distanceTraveled: from.distanceTo(here), distanceToTarget: here.distanceTo(new Vec3(position.x, position.y, position.z)),
+            elapsedMs: Date.now() - started, estimatedTimeMs: 0, pathCost: 0,
+            environment: { inWater: !!current.entity.isInWater, nearbyLiquids: [] },
+          };
+        }
+        emit({ kind: 'log', level: 'warn', message: `[navigate] could not fly: ${flown.message}; walking instead` });
+      }
       // 走进传送门：要踩进那一格，站着等它传过去（生存模式站 4 秒）；到了另一边就算走到了
       const portal = current.blockAt(new Vec3(Math.floor(position.x), Math.floor(position.y), Math.floor(position.z)));
       if (portal && /_portal$/.test(portal.name)) {
