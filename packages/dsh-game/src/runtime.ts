@@ -421,6 +421,7 @@ export const GAMES = {
         rcon: setup.rconPassword ? { host: setup.host, port: setup.rconPort, password: setup.rconPassword } : null,
         journalDir: minecraftJournalDir(),
         creative: setup.gameMode === 'creative',
+        clientDir: setup.clientDir,
         // 开局前先查一遍开局设置（她自己调 game_start 时也一样），没过就不开
         preflight: () => mcSetup.check().then((c) => c.problem),
         record,

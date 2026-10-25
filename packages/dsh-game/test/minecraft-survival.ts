@@ -770,7 +770,12 @@ async function creativeCases(): Promise<void> {
   const designed = await session.act({ action: 'design', name: '穹顶塔', text: tower });
   note(designed.split('\n').slice(0, 2).join(' | '));
   check(/存好了/.test(designed) && /创造模式不用材料/.test(designed) && /宽 11.*深 11.*高 17/.test(designed), '存好了，11×11×17，说了不用材料');
+  const png = (session as any).takeImage();
+  check(!!png && png.data[0] === 0x89 && png.data.length > 5000 && /附了一张渲染图/.test(designed), `design 附了渲染图（${png ? `${png.data.length} 字节` : '没有'}）`);
+  if (png) fs.writeFileSync(path.join(ROOT, 'packages', 'dsh-game', 'test', '.out', 'preview-tower.png'), png.data);
   const slice = await session.act({ action: 'view', name: '穹顶塔', index: 3 });
+  const cut = (session as any).takeImage();
+  check(!!cut && /切开图/.test(slice), 'view 附了切开图');
   check(/第 3 层/.test(slice) && /S\.+S/.test(slice), `view 看得到第 3 层的切片（墙中间是空的）`);
   const built = await act('build', { name: '穹顶塔', text: `${C.x} ${C.y} ${C.z}` }, 120_000);
   check(/：做完了/.test(built), `盖完了（${built.slice(0, 120)}）`);
@@ -825,9 +830,19 @@ async function reset(): Promise<void> {
   await rcon(`kill @e[type=item,x=${X},y=${Y},z=${Z},distance=..30]`);
 }
 
+/** 装好游戏的 .minecraft（图纸渲染图要用游戏 jar）：开发时开局设置里填的那个 */
+const CLIENT_DIR = (() => {
+  try {
+    return String(JSON.parse(fs.readFileSync(path.join(ROOT, '.dsh-home', 'dsh-game', 'minecraft-setup.json'), 'utf8')).clientDir ?? '');
+  } catch {
+    return '';
+  }
+})();
+
 function newSession(creative = false): MinecraftSession {
   return new MinecraftSession({
     creative,
+    clientDir: CLIENT_DIR,
     workerPath: path.join(ROOT, 'packages', 'dsh-game', 'lib', 'minecraft-worker.cjs'),
     host: '127.0.0.1', port: Number(props['server-port'] || 25565), username: NAME,
     record: () => {}, camera: null, rcon: RCON, journalDir: JOURNAL_DIR,

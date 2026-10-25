@@ -326,11 +326,24 @@ export function apply(ctx: AgentContext): void {
       text: { type: 'string', description: '文字，这件事要它时填' },
       ...MOOD_PARAMS,
     },
-    output: { schema: { type: 'string' }, render: (_args, value) => text(value) },
+    output: {
+      schema: { type: 'object', properties: { text: { type: 'string', required: true }, image: { type: 'json', required: true } }, additionalProperties: false },
+      render: (_args, value: any) => [
+        ...text(value.text),
+        ...(value.image ? [{ type: 'image' as const, attachment: value.image }] : []),
+      ],
+    },
     async execute(args, exec) {
       const session = games.session;
-      if (!session) return noGame(exec);
-      if (movedAway(exec)) return MOVED_AWAY;
+      if (!session) return { text: noGame(exec), image: null };
+      if (movedAway(exec)) return { text: MOVED_AWAY, image: null };
+      // 做完这件事游戏附了图（图纸的渲染图）：存成附件一起交给她
+      const withImage = async (result: string) => {
+        const shot = session.takeImage?.();
+        if (!shot) return { text: result, image: null };
+        const [image] = await ctx.attachments.saveImages([{ data: shot.data, mediaType: shot.mediaType, name: 'game-preview' }]);
+        return { text: result, image };
+      };
       // 动作和参数原样交给游戏：哪些动作、什么参数由游戏自己定
       const action = {
         action: String(args.action ?? ''),
@@ -340,17 +353,17 @@ export function apply(ctx: AgentContext): void {
       };
       // 现在做不了：这次表态作废，她这条消息的话也不念（念了再被拒，听起来像自己打脸），直接把原因交给她
       const refusal = session.refuse?.(action);
-      if (refusal) return refusal;
+      if (refusal) return { text: refusal, image: null };
       games.resume();
       // 实时游戏：她说话的同时身体就开始动（动作本身立刻返回）；念完再交回结果，免得下一句话叠在这句上
       if (session.realtime) {
         const voicing = voiceOwnWords(ctx, exec, args.mood);
         const result = await session.act(action);
         await voicing;
-        return result;
+        return withImage(result);
       }
       await voiceOwnWords(ctx, exec, args.mood);
-      return session.act(action);
+      return withImage(await session.act(action));
     },
   })), 'game_act tool');
 }

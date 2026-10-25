@@ -10,6 +10,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import type { GameAction, GameActionSpec, GameSession, LiveSource, Moment, RunEvent } from '../types.js';
 import type { MinecraftActionResult, MinecraftEnvironmentSnapshot, MinecraftHudState, MinecraftObservedEntity } from './body/contracts.js';
 import type { MinecraftRuntimeEvent, MinecraftStatus } from './body/protocol.js';
@@ -20,6 +21,8 @@ import { TEMPLATES, clearCells, describeBlueprint, ghostCells, layerSlice, mater
 import { GhostBuild } from './ghost.js';
 import { isShapeText, parseShapes } from './shapes.js';
 import { placeLayers, worldBase } from './creative.js';
+import { BlockColors, VIEW_LABELS, renderBlueprint } from './preview.js';
+import { GameJar } from './gameJar.js';
 import { WorldJournal, dimensionName } from './journal.js';
 
 export interface MinecraftOptions {
@@ -44,6 +47,8 @@ export interface MinecraftOptions {
   journalDir?: string | null;
   /** 创造模式（开局用 RCON 切过去；盖房子用 RCON 一层层放，见 creative.ts）。要有 rcon */
   creative?: boolean;
+  /** 装好游戏的 .minecraft（图纸渲染图从这个版本的 jar 里拿方块颜色）；空 = 官方启动器的默认位置 */
+  clientDir?: string;
 }
 
 /** 隔多久把旁观者重新挂一次（对方按了 Shift 被甩开时，最多这么久就挂回来） */
@@ -163,6 +168,10 @@ export class MinecraftSession implements GameSession {
   private camera: CameraClient | null = null;
   /** 她画好的图纸：名字 → 图纸（这局里一直在） */
   private designs = new Map<string, Blueprint>();
+  /** 图纸渲染图用的方块颜色（没装客户端就是 null） */
+  private colors: BlockColors | null | undefined;
+  /** 刚做完的那件事附带的图（game_act 取走） */
+  private image: { data: Uint8Array; mediaType: 'image/png' } | null = null;
   private journal: WorldJournal | null = null;
   private lastJournalSave = 0;
   private lastDeathAt = 0;
@@ -206,13 +215,13 @@ export class MinecraftSession implements GameSession {
       '【世界不会等你】你说话、想事情的时候，游戏里的时间照样在走：天会黑，怪会刷出来。用 game_continue 看发生了什么，它在有事发生时（或者最多两分钟）回来。',
       '【名字】物品、方块、生物都用游戏里的英文 id：oak_log（橡木原木）、cobblestone（圆石）、crafting_table（工作台）、wooden_pickaxe（木镐）、iron_ingot（铁锭）、zombie（僵尸）……',
       '【目标】长期想做的事用 goal 写下来，每个时刻都会提醒你，换多少轮都不会忘。',
-      '【盖房子】房子是你自己设计的：用 design 交一张图纸（图例 + 从下往上一层层的字符图），会给你看正面、侧面、俯视三张投影、材料清单和图上的问题，你看着改；满意了用 build 在一个坐标盖起来，身体照图纸一块块放。template 有几张常见建筑的参考图纸，可以照着改。',
+      '【盖房子】房子是你自己设计的：用 design 交一张图纸（图例 + 从下往上一层层的字符图），会给你看正面、侧面、俯视三张投影、一张渲染图（用游戏里方块的颜色画的立体图，四个角各看一眼）、材料清单和图上的问题，你看着改；满意了用 build 在一个坐标盖起来，身体照图纸一块块放。template 有几张常见建筑的参考图纸，可以照着改。',
       '【种地】锄头锄过的泥土是耕地，种子种上去过几分钟（游戏时间）一阶一阶长大；耕地离水 4 格以内长得快。熟了用 harvest 收，种子会补种回去。动物用对的饲料喂一对就会生一只小的；栅栏、羊圈可以用 design 画了 build。',
       '【形状图纸】design 除了字符图，也能用形状写（大的、圆的、斜的用这个）。先写一行 materials: Q=quartz_block S=stone_bricks（字母=方块，方块可以带 [facing=north] 这样的状态），再一行一个形状：'
         + 'box M from x y z to x y z；sphere M center x y z radius r（写三个数 rx ry rz 是椭球；加 top / bottom 只要上半 / 下半）；cylinder M center x y z radius r height h（底面中心，默认竖着往上；axis x / z 横着放，沿 +x / +z 方向伸长）；'
         + 'cone M 或 pyramid M center x y z radius r height h（底面中心往上收成尖，加 down 尖朝下）；arch M center x y z radius r length l axis x 或 z（拱：半圆朝上，沿轴伸长）；line M from x y z to x y z；blueprint 图纸名 at x y z（把一张存好的图纸放在这里，西北角最下面对着这个点）。'
         + '形状后面可以加 hollow t（空心，壁厚 t）、open top / bottom / both（空心时那一头不封口；半球和拱的切面本来就是开口）。前面加 cut 是从前面画的形状里挖掉（门洞、窗户），材料写 air 是把世界里那些格子清空。'
-        + '坐标都是方块坐标，相对于 build 时给的那个点（形状里的 0 0 0），x 往东、y 往上、z 往南；格子中心落在形状里就算（半径 6 的球 13 格宽）；后写的盖掉先写的。最大 256×256×256、100 万块。用 view 看某一层的切片。',
+        + '坐标都是方块坐标，相对于 build 时给的那个点（形状里的 0 0 0），x 往东、y 往上、z 往南；格子中心落在形状里就算（半径 6 的球 13 格宽）；后写的盖掉先写的。最大 256×256×256、100 万块。用 view 看某一层的切片，附一张只画到那一层的切开图（看里面是不是空的、楼层怎么分）。',
       '【下界】用 10 块黑曜石搭一个门框（参考图纸 nether_portal），拿打火石（flint_and_steel：1 铁锭 + 1 燧石）点门框里面最底下那块的上面，门框里会亮起紫色的传送门；走进去站一会儿就到了下界，从下界的门走回来就回到主世界。黑曜石要钻石镐才挖得动；岩浆源头碰到水会变成黑曜石，流动的岩浆碰到水变成圆石。下界到处是岩浆；床在那里一睡就会爆炸；水倒出来会马上蒸发；猪灵会打没穿金盔甲的人。',
       '【日志】每个世界有一本日志：你的目标、存好的图纸、用 mark 记的地点，还有盖过的房子、种过的地、床、死在哪，下次来这个世界还在。',
       '【说话】你回复里写的话是说出口的（主人和观众听得到）；游戏里的玩家要用 chat 才看得到。',
@@ -295,6 +304,7 @@ export class MinecraftSession implements GameSession {
   }
 
   async act(action: GameAction): Promise<string> {
+    this.image = null;
     const runtime = this.runtime;
     if (!runtime) return '还没进游戏。';
     const name = action.name?.trim().toLowerCase().replace(/^minecraft:/, '').replace(/\s+/g, '_') ?? '';
@@ -325,16 +335,19 @@ export class MinecraftSession implements GameSession {
         const have = this.snapshot?.body?.inventory ?? {};
         const short = Object.entries(materials(parsed.blueprint)).filter(([n, c]) => (have[n] ?? 0) < c).map(([n, c]) => `${n} 还差 ${c - (have[n] ?? 0)}`);
         const enough = this.options.creative ? '创造模式不用材料。' : short.length ? `照现在的背包，材料${short.join('，')}。` : '材料够了。';
+        const picture = unknown.length ? '' : this.preview(parsed.blueprint) ? `附了一张渲染图（${VIEW_LABELS}；四个角各看一眼）。` : '';
         return [
           action.action === 'template' ? `参考图纸 ${title}：${TEMPLATES[title].title}\n${text}\n` : '',
           preview,
-          unknown.length ? '' : `存好了，可以 build ${title}。${enough}${parsed.blueprint.offset ? `用 view 看切片（共 ${parsed.blueprint.height} 层）。` : ''}`,
+          unknown.length ? '' : `存好了，可以 build ${title}。${enough}${parsed.blueprint.offset ? `用 view 看切片（共 ${parsed.blueprint.height} 层）。` : ''}${picture}`,
         ].filter(Boolean).join('\n');
       }
       case 'view': {
         const bp = this.designs.get(action.name!.trim())!;
         const k = Math.max(1, Math.min(bp.height, Math.round(action.index ?? 1)));
-        return `图纸「${action.name!.trim()}」${layerSlice(bp, k)}`;
+        // 切开图：只画到这一层（上面的都拿掉），看得到这一层以里的样子
+        const cut = this.preview({ ...bp, layers: bp.layers.slice(0, k), height: k });
+        return `图纸「${action.name!.trim()}」${layerSlice(bp, k)}${cut ? `\n附了一张切开图：只画到第 ${k} 层，上面的都拿掉了（${VIEW_LABELS}）。` : ''}`;
       }
       case 'mark': {
         if (!this.journal) return '这局没有世界日志（DSH 主目录不可写）。';
@@ -486,6 +499,34 @@ export class MinecraftSession implements GameSession {
       return { actionId: running.id, outcome: r.failed.length ? 'partial' : 'succeeded', summary, durationMs, inventoryDelta: {}, worldChanges: [], observations: [] };
     };
     void run().then((r) => this.finishRunning(running, r), (err: Error) => this.finishRunning(running, null, err.message));
+  }
+
+  /** 画一张图纸的渲染图，等 game_act 取走；画不了（没装客户端）返回 false */
+  private preview(bp: Blueprint): boolean {
+    if (this.colors === undefined) {
+      const version = this.status?.version ?? '';
+      const root = version ? findMinecraftRoot(this.options.clientDir ?? this.options.camera?.clientDir ?? '', version) : null;
+      try {
+        this.colors = root ? new BlockColors(new GameJar(path.join(root, 'versions', version, `${version}.jar`))) : null;
+      } catch (err) {
+        this.options.log?.(`[preview] could not open the game jar: ${(err as Error).message}`);
+        this.colors = null;
+      }
+    }
+    if (!this.colors) return false;
+    try {
+      this.image = { data: renderBlueprint(bp, this.colors), mediaType: 'image/png' };
+      return true;
+    } catch (err) {
+      this.options.log?.(`[preview] could not render: ${(err as Error).message}`);
+      return false;
+    }
+  }
+
+  takeImage(): { data: Uint8Array; mediaType: 'image/png' } | null {
+    const image = this.image;
+    this.image = null;
+    return image;
   }
 
   /** 字符图或形状图纸（形状里可以引用已经存好的图纸） */
