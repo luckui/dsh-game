@@ -143,6 +143,11 @@ export class WorldJournal {
     this.save();
   }
 
+  /** 盖过的这座建筑（最近的在前） */
+  buildingsNamed(name: string): { x: number; y: number; z: number; dimension: string }[] {
+    return this.data.buildings.filter((b) => b.name === name);
+  }
+
   /** 盖完（或盖了一部分）：同一个名字盖在同一个地方算同一座 */
   addBuilding(name: string, spot: Spot, done: number, total: number): void {
     this.data.buildings = [{ name, ...spot, done, total, at: Date.now() }, ...this.data.buildings.filter((b) => !(b.name === name && b.x === spot.x && b.y === spot.y && b.z === spot.z))].slice(0, MAX_LIST);

@@ -103,6 +103,7 @@ const ACTIONS: GameActionSpec[] = [
   { action: 'design', description: '交一张自己画的图纸，看它的正面、侧面、俯视三张投影、材料清单和问题（不会动手盖）。格式：先写「图例：」，每行「字符 方块的英文 id」，楼梯、门这类可以跟 facing=north/south/east/west（放的时候人朝哪边）、half=top/bottom；再写「第1层：」「第2层：」……从下往上一层层画。每层第一行在最北边，往下一行往南一格；每行从左往右是从西往东。「.」是空气（那里原来有东西会挖掉），空格是不管（原来是什么留着什么）。门在上下两层画同一个字符。最大宽 16、深 16、高 12。', params: { name: '给图纸起个名字', text: '图纸' } },
   { action: 'view', description: '看一张图纸某一层的切片（从上往下看这一层，上面是北）：圆顶、塔里面是不是空的、门洞开在哪，投影看不出来时用', params: { name: '图纸的名字', index: '第几层（从下往上数，从 1 开始）' } },
   { action: 'site', description: '给一张图纸选好地方：那里会出现它的虚影（看的人能看到你的设计，摄像机会去看它），之后用 design 改同名图纸，虚影跟着变；build 不写坐标就盖在这里', params: { name: '图纸的名字', text: '坐标「x y z」：图纸放在哪（和 build 的坐标一样）' } },
+  { action: 'show', description: '带看的人看一座盖好的建筑：你飞到它东南边斜上方能看全它的地方、面朝它，摄像机绕着它转一圈（一分钟）再回到你身后', params: { name: '建筑的名字（盖过的图纸名）' } },
   { action: 'build', description: '照一张图纸盖起来（后台做；用 site 选过地方的可以不写坐标）：材料不够会告诉你缺多少；够不着的地方身体会垫方块爬上去，盖完拆掉；每盖完一层告诉你一声', params: { name: '图纸的名字（先 design 或 template 过）', text: '坐标「x y z」：图纸第 1 层第一行第一格（西北角、最下面那格）放在哪' } },
   { action: 'farm', description: '开一块地种上（后台做）：清掉地上的草、用锄头锄成耕地、播种。要有锄头（任何材质）和种子；耕地 4 格内有水才长得快（没有水会告诉你）', params: { name: '种子：wheat_seeds（小麦）、carrot、potato、beetroot_seeds（甜菜）', text: '坐标「x y z」：地的西北角（地面那格）', index: '边长（默认 3，最大 9）' } },
   { action: 'harvest', description: '收附近 16 格内熟了的庄稼，捡起来，再补种回去（后台做）；没熟的会告诉你长到第几阶段了', params: { name: '只收哪种：wheat、carrots、potatoes、beetroots（不填就都收）' } },
@@ -264,6 +265,8 @@ export class MinecraftSession implements GameSession {
     this.disconnected = false;
     // 上一局（DSH 被关掉时）可能留着虚影
     if (this.options.rcon) void GhostBuild.clearAll(this.options.rcon);
+    // 上一局的导播实体
+    if (this.options.rcon) void rcon(this.options.rcon, 'kill @e[type=item_display,tag=dsh_cam]').catch(() => {});
     // 生存 / 创造：按开局设置切过去（上一局可能是另一个模式）
     if (this.options.rcon) await rcon(this.options.rcon, `gamemode ${this.options.creative ? 'creative' : 'survival'} ${this.options.username}`).catch(() => {});
     void this.startCamera();
@@ -303,6 +306,8 @@ export class MinecraftSession implements GameSession {
       && !(action.action === 'build' && this.sites.has(action.name?.trim() ?? ''))) return `${action.action} 要在 text 里填坐标「x y z」。`;
     if (['template', 'design', 'build', 'view', 'site'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
     if (action.action === 'site' && !this.designs.has(action.name!.trim())) return `还没有叫「${action.name}」的图纸：先 design 交一张。`;
+    if (action.action === 'show' && !action.name?.trim()) return 'show 要填 name（盖过的建筑名）。';
+    if (action.action === 'show' && !this.builtAt(action.name!.trim())) return `不知道「${action.name}」盖在哪（日志里没有这座建筑${this.designs.size ? '' : '，也没有它的图纸'}）。`;
     if (action.action === 'site' && !this.options.rcon) return '服务器没开 RCON，放不了虚影（开局设置里填 RCON 密码）。';
     if (action.action === 'view' && !this.designs.has(action.name!.trim())) return `还没有叫「${action.name}」的图纸。`;
     if (action.action === 'design' && !action.text?.trim()) return 'design 要在 text 里放图纸。';
@@ -326,7 +331,7 @@ export class MinecraftSession implements GameSession {
     const xyz = parseXyz(action.text) ?? (action.action === 'build' ? this.sites.get(action.name?.trim() ?? '')?.origin ?? null : null);
     // 去做别的事了：摄像机回到她身上（飞到草稿附近看它不算：离草稿 64 格以内的 go 摄像机接着拍草稿）
     const nearDraft = action.action === 'go' && !!xyz && !!this.director && Math.hypot(xyz.x - this.director.center.x, xyz.z - this.director.center.z) <= 64;
-    if (!nearDraft && !['design', 'template', 'view', 'site', 'build', 'look', 'journal', 'mark', 'goal', 'chat'].includes(action.action)) this.stopDirecting();
+    if (!nearDraft && !['design', 'template', 'view', 'site', 'build', 'show', 'look', 'journal', 'mark', 'goal', 'chat'].includes(action.action)) this.stopDirecting();
     switch (action.action) {
       case 'goal':
         this.goal = action.text!.trim();
@@ -359,6 +364,22 @@ export class MinecraftSession implements GameSession {
           preview,
           unknown.length ? '' : `存好了，可以 build ${title}。${enough}${parsed.blueprint.offset ? `用 view 看切片（共 ${parsed.blueprint.height} 层）。` : ''}${picture}${sited}`,
         ].filter(Boolean).join('\n');
+      }
+      case 'show': {
+        const title = action.name!.trim();
+        const where = this.builtAt(title)!;
+        const bp = this.designs.get(title)!;
+        const b = worldBase(bp, where);
+        const center = { x: b.x + bp.width / 2, y: b.y + bp.height / 2, z: b.z + bp.depth / 2 };
+        const size = Math.max(bp.width, bp.depth, bp.height);
+        // 她：东南边斜上方，离开它的大小那么远，看得到全貌
+        const d = size * 0.9 + 6;
+        const spot = { x: Math.round(center.x + d * 0.7), y: Math.round(b.y + bp.height * 0.7 + 3), z: Math.round(center.z + d * 0.7) };
+        const flown = await this.body('go_to', { position: spot, range: 1 }, 90_000).catch(() => null);
+        if (this.options.rcon) await rcon(this.options.rcon, `execute as ${this.options.username} at @s run tp @s ~ ~ ~ facing ${center.x.toFixed(1)} ${center.y.toFixed(1)} ${center.z.toFixed(1)}`).catch(() => {});
+        this.directAround(center, size, bp.height, 62_000);
+        const there = flown?.outcome === 'succeeded' ? `你在 ${fmtXyz(spot)}，面朝它` : '没飞到看它的地方，摄像机还是会去拍它';
+        return `带大家看「${title}」：${there}；摄像机绕着它转一圈（一分钟），然后回到你身后。`;
       }
       case 'site': {
         const title = action.name!.trim();
@@ -538,6 +559,13 @@ export class MinecraftSession implements GameSession {
     void run().then((r) => this.finishRunning(running, r), (err: Error) => this.finishRunning(running, null, err.message));
   }
 
+  /** 一座盖过的建筑在哪：日志里最近一次盖它的位置（要有它的图纸） */
+  private builtAt(title: string): { x: number; y: number; z: number } | null {
+    if (!this.designs.has(title)) return null;
+    const b = this.journal?.buildingsNamed(title)[0];
+    return b ? { x: b.x, y: b.y, z: b.z } : null;
+  }
+
   /** 在选好的地方放出（或换上）这张图纸的虚影；摄像机去看它。返回给她的一句话 */
   private async showDraft(title: string, origin: { x: number; y: number; z: number }): Promise<string> {
     const target = this.options.rcon;
@@ -559,27 +587,44 @@ export class MinecraftSession implements GameSession {
   }
 
   /** 导播：摄像机离开她，从东南边斜上方绕着这块地慢慢转（一圈一分钟） */
-  private directAt(bp: Blueprint, origin: { x: number; y: number; z: number }): void {
+  private directAt(bp: Blueprint, origin: { x: number; y: number; z: number }, forMs = 180_000): void {
+    const b = worldBase(bp, origin);
+    this.directAround({ x: b.x + bp.width / 2, y: b.y + bp.height / 2, z: b.z + bp.depth / 2 }, Math.max(bp.width, bp.depth, bp.height), bp.height, forMs);
+  }
+
+  /**
+   * 导播：摄像机挂在一个看不见的展示实体（item_display，标签 dsh_cam）上，挪这个实体。
+   * 直接瞬移摄像机，客户端不补帧，一顿一顿的；挂在实体上，画面跟着实体在客户端的位置走，
+   * 展示实体的 teleport_duration 让客户端在两次挪动之间平滑地过渡（每 0.25 秒挪一次，过渡也是 0.25 秒）
+   */
+  private directAround(center: { x: number; y: number; z: number }, size: number, height: number, forMs: number): void {
     const target = this.options.rcon;
     if (!target || !this.cameraName || !this.cameraSeen) return;
-    const b = worldBase(bp, origin);
-    const center = { x: b.x + bp.width / 2, y: b.y + bp.height / 2, z: b.z + bp.depth / 2 };
-    const size = Math.max(bp.width, bp.depth, bp.height);
     const radius = size * 1.1 + 8;
-    const lift = Math.max(bp.height * 0.6, radius * 0.45);
+    const lift = Math.max(height * 0.6, radius * 0.45);
     const start = Date.now();
+    const at = (t: number) => {
+      const angle = Math.PI / 4 + (t / 60_000) * Math.PI * 2;
+      return `${(center.x + radius * Math.cos(angle)).toFixed(2)} ${(center.y + lift).toFixed(2)} ${(center.z + radius * Math.sin(angle)).toFixed(2)} facing ${center.x.toFixed(2)} ${center.y.toFixed(2)} ${center.z.toFixed(2)}`;
+    };
+    const fresh = !this.director;
     if (this.director) clearInterval(this.director.timer);
-    void rcon(target, `execute as ${this.cameraName} run spectate`).catch(() => {});
+    if (fresh) {
+      void rconBatch(target, [
+        'kill @e[type=item_display,tag=dsh_cam]',
+        `execute as ${this.cameraName} run spectate`,
+        `summon item_display ${at(0).split(' facing')[0]} {teleport_duration:5,Tags:["dsh_cam"]}`,
+        `spectate @e[type=item_display,tag=dsh_cam,limit=1] ${this.cameraName}`,
+      ]).catch(() => {});
+    }
     const step = () => {
       if (!this.director) return;
       if (Date.now() > this.director.until) { this.stopDirecting(); return; }
-      const angle = Math.PI / 4 + ((Date.now() - start) / 60_000) * Math.PI * 2;
-      const x = center.x + radius * Math.cos(angle);
-      const z = center.z + radius * Math.sin(angle);
-      void rcon(target, `tp ${this.cameraName} ${x.toFixed(2)} ${(center.y + lift).toFixed(2)} ${z.toFixed(2)} facing ${center.x.toFixed(2)} ${center.y.toFixed(2)} ${center.z.toFixed(2)}`).catch(() => {});
+      // 往前算 0.25 秒：实体在过渡结束时正好到那里
+      void rcon(target, `tp @e[type=item_display,tag=dsh_cam,limit=1] ${at(Date.now() - start + 250)}`).catch(() => {});
     };
     // 太久没动静（3 分钟）就回到她身上；盖的时候盖完再延
-    this.director = { timer: setInterval(step, 200), until: Date.now() + 180_000, center };
+    this.director = { timer: setInterval(step, 250), until: Date.now() + forMs, center };
     step();
   }
 
@@ -588,7 +633,9 @@ export class MinecraftSession implements GameSession {
     if (!this.director) return;
     clearInterval(this.director.timer);
     this.director = null;
-    void this.reattachCamera();
+    const target = this.options.rcon;
+    if (target) void rconBatch(target, [`execute as ${this.cameraName} run spectate`, 'kill @e[type=item_display,tag=dsh_cam]']).catch(() => {}).then(() => this.reattachCamera());
+    else void this.reattachCamera();
   }
 
   /** 画一张图纸的渲染图，等 game_act 取走；画不了（没装客户端）返回 false */
@@ -682,6 +729,7 @@ export class MinecraftSession implements GameSession {
     this.saveLast();
     if (this.director) clearInterval(this.director.timer);
     this.director = null;
+    if (this.options.rcon) await rcon(this.options.rcon, 'kill @e[type=item_display,tag=dsh_cam]').catch(() => {});
     for (const site of this.sites.values()) await site.ghost?.clear();
     this.sites.clear();
     await this.clearGhosts();
