@@ -24,7 +24,8 @@ const props = Object.fromEntries(
 );
 const RCON: RconTarget = { host: '127.0.0.1', port: Number(props['rcon.port'] || 25575), password: props['rcon.password'] };
 const NAME = 'SelfTest';
-const X = 1000, Y = 200, Z = 1000;
+// 离她的世界远一点（她在 1000 附近盖了岛、教堂、灯塔）：场地和她的建筑互不碰
+const X = 5000, Y = 200, Z = 5000;
 const rcon = (cmd: string) => rconRaw(RCON, cmd);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 身体的日志（排查用） */
@@ -160,12 +161,13 @@ async function buildArena(): Promise<void> {
   // 先清掉一大圈（上次测试时寻路器搭的方块可能落在墙外，会把她引出去）
   await rcon(`fill ${X - 16} ${Y - 5} ${Z - 16} ${X + 16} ${Y + 12} ${Z + 16} air`);
   await rcon(`fill ${X - 10} ${Y - 4} ${Z - 10} ${X + 10} ${Y} ${Z + 10} dirt`);
-  // 一圈玻璃墙加玻璃顶，免得走出、爬出平台掉下去
-  await rcon(`fill ${X - 10} ${Y + 7} ${Z - 10} ${X + 10} ${Y + 7} ${Z + 10} glass`);
-  await rcon(`fill ${X - 10} ${Y + 1} ${Z - 10} ${X + 10} ${Y + 6} ${Z - 10} glass`);
-  await rcon(`fill ${X - 10} ${Y + 1} ${Z + 10} ${X + 10} ${Y + 6} ${Z + 10} glass`);
-  await rcon(`fill ${X - 10} ${Y + 1} ${Z - 10} ${X - 10} ${Y + 6} ${Z + 10} glass`);
-  await rcon(`fill ${X + 10} ${Y + 1} ${Z - 10} ${X + 10} ${Y + 6} ${Z + 10} glass`);
+  // 底下一层基岩、四周和顶上是屏障（挖不动、看不见）：寻路器为了够下面的东西把地板挖穿、凿墙出去，就会从 200 格高摔下去
+  await rcon(`fill ${X - 10} ${Y - 5} ${Z - 10} ${X + 10} ${Y - 5} ${Z + 10} bedrock`);
+  await rcon(`fill ${X - 10} ${Y + 7} ${Z - 10} ${X + 10} ${Y + 7} ${Z + 10} barrier`);
+  await rcon(`fill ${X - 10} ${Y + 1} ${Z - 10} ${X + 10} ${Y + 6} ${Z - 10} barrier`);
+  await rcon(`fill ${X - 10} ${Y + 1} ${Z + 10} ${X + 10} ${Y + 6} ${Z + 10} barrier`);
+  await rcon(`fill ${X - 10} ${Y + 1} ${Z - 10} ${X - 10} ${Y + 6} ${Z + 10} barrier`);
+  await rcon(`fill ${X + 10} ${Y + 1} ${Z - 10} ${X + 10} ${Y + 6} ${Z + 10} barrier`);
   // 三棵「树」：四格高的橡木原木柱
   for (const [dx, dz] of [[-6, -6], [-6, 6], [6, -6]]) await rcon(`fill ${X + dx} ${Y + 1} ${Z + dz} ${X + dx} ${Y + 4} ${Z + dz} oak_log`);
   // 一堆石头、三块铁矿、三块煤矿
@@ -335,11 +337,11 @@ async function buildCases(): Promise<void> {
   const { TEMPLATES, parseBlueprint, placements } = await import('../src/games/minecraft/blueprint.js');
   // 场地里面清空，墙和顶加高（塔有 8 层）
   await rcon(`fill ${X - 9} ${Y + 1} ${Z - 9} ${X + 9} ${Y + 10} ${Z + 9} air`);
-  await rcon(`fill ${X - 10} ${Y + 7} ${Z - 10} ${X + 10} ${Y + 7} ${Z + 10} air replace glass`);
+  await rcon(`fill ${X - 10} ${Y + 7} ${Z - 10} ${X + 10} ${Y + 7} ${Z + 10} air replace barrier`);
   for (const [a, b] of [[`${X - 10} ${Y + 1} ${Z - 10}`, `${X + 10} ${Y + 10} ${Z - 10}`], [`${X - 10} ${Y + 1} ${Z + 10}`, `${X + 10} ${Y + 10} ${Z + 10}`], [`${X - 10} ${Y + 1} ${Z - 10}`, `${X - 10} ${Y + 10} ${Z + 10}`], [`${X + 10} ${Y + 1} ${Z - 10}`, `${X + 10} ${Y + 10} ${Z + 10}`]]) {
-    await rcon(`fill ${a} ${b} glass`);
+    await rcon(`fill ${a} ${b} barrier`);
   }
-  await rcon(`fill ${X - 10} ${Y + 11} ${Z - 10} ${X + 10} ${Y + 11} ${Z + 10} glass`);
+  await rcon(`fill ${X - 10} ${Y + 11} ${Z - 10} ${X + 10} ${Y + 11} ${Z + 10} barrier`);
   await reset();
   await rcon(`tp ${NAME} ${X} ${Y + 1} ${Z}`);
   await sleep(1500);
@@ -533,7 +535,7 @@ async function journalCases(): Promise<void> {
   note(await session.act({ action: 'goal', text: '在空岛上盖一个家' }));
   const home = await session.act({ action: 'mark', name: '家' });
   note(home);
-  check(/记下了：「家」在 \(1000, 201, 1000\)/.test(home), 'mark 不填坐标：记她站的地方');
+  check(home.includes(`记下了：「家」在 (${X}, ${Y + 1}, ${Z})`), 'mark 不填坐标：记她站的地方');
   note(await session.act({ action: 'mark', name: '矿洞', text: `${X - 5} ${Y - 3} ${Z + 4}` }));
   note(await session.act({ action: 'mark', name: '临时', text: `${X} ${Y} ${Z}` }));
   const removed = await session.act({ action: 'mark', name: '临时', text: '删掉' });
@@ -562,11 +564,11 @@ async function journalCases(): Promise<void> {
   const whole = await session.act({ action: 'journal' });
   note(whole.replace(/\n/g, ' | ').slice(0, 600));
   check(/目标：在空岛上盖一个家/.test(whole), '目标记下了');
-  check(/家 \(1000, 201, 1000\)/.test(whole) && /矿洞 \(995, 197, 1004\)/.test(whole) && !/临时/.test(whole), '地点：家、矿洞在，删掉的不在');
-  check(/「小石台」在 \(1003, 201, 997\)，盖完了/.test(whole), '盖过的建筑：名字、坐标、盖完了');
-  check(/wheat_seeds 2×2 在 \(996, 200, 996\)/.test(whole), '种过的地');
+  check(whole.includes(`家 (${X}, ${Y + 1}, ${Z})`) && whole.includes(`矿洞 (${X - 5}, ${Y - 3}, ${Z + 4})`) && !/临时/.test(whole), '地点：家、矿洞在，删掉的不在');
+  check(whole.includes(`「小石台」在 (${X + 3}, ${Y + 1}, ${Z - 3})，盖完了`), '盖过的建筑：名字、坐标、盖完了');
+  check(whole.includes(`wheat_seeds 2×2 在 (${X - 4}, ${Y}, ${Z - 4})`), '种过的地');
   check(/床（复活点）：/.test(whole), '床记下了');
-  check(/死过 1 次，最近一次在 \(1002, 201, 1002\)/.test(whole), '死在哪记下了');
+  check(whole.includes(`死过 1 次，最近一次在 (${X + 2}, ${Y + 1}, ${Z + 2})`), '死在哪记下了');
   check(/存着的图纸：小石台/.test(whole), '图纸在日志里');
 
   begin('日志：下一局开局接上');
@@ -575,7 +577,7 @@ async function journalCases(): Promise<void> {
   const again = await session.start();
   note(again.replace(/\n/g, ' | ').slice(0, 700));
   check(/你在这里玩过 1 次，上次是/.test(again), '说了玩过几次、上次什么时候');
-  check(/目标：在空岛上盖一个家/.test(again) && /家 \(1000, 201, 1000\)/.test(again) && /「小石台」/.test(again), '目标、地点、建筑都在');
+  check(/目标：在空岛上盖一个家/.test(again) && again.includes(`家 (${X}, ${Y + 1}, ${Z})`) && /「小石台」/.test(again), '目标、地点、建筑都在');
   check(/你的目标：在空岛上盖一个家/.test((await session.wait(AbortSignal.timeout(3000), 2000)).notes.join(' ')), '目标接上了（每个时刻都提醒）');
   const rebuild = session.refuse({ action: 'build', name: '小石台', text: `${X - 6} ${Y + 1} ${Z + 3}` });
   check(rebuild === null, `上一局的图纸能直接 build（${rebuild ?? '可以'}）`);
@@ -840,6 +842,15 @@ async function creativeCases(): Promise<void> {
   const isAt = async (dx: number, dy: number, dz: number, b: string) => /passed/i.test(await rcon(`execute if block ${H.x + dx} ${H.y + dy} ${H.z + dz} ${b}`));
   check(await isAt(0, 4, -3, 'spruce_stairs[facing=south]') && await isAt(0, 4, 3, 'spruce_stairs[facing=north]') && await isAt(0, 7, 0, 'spruce_planks'), '世界里：北坡楼梯朝南、南坡朝北、屋脊在顶上');
 
+  begin('创造模式：要用的东西直接拿（种地不用先找锄头和种子；合成、采集不用做）');
+  await rcon(`clear ${NAME}`);
+  await rcon(`fill ${C.x + 20} ${C.y - 1} ${C.z - 2} ${C.x + 24} ${C.y - 1} ${C.z + 2} grass_block`);
+  await sleep(1000);
+  const farmed = await act('farm', { name: 'wheat_seeds', text: `${C.x + 21} ${C.y - 1} ${C.z - 1}`, index: 3 }, 120_000);
+  check(/：做完了/.test(farmed), `背包空着也种上了（${farmed.slice(0, 120)}）`);
+  const crafted = await session.act({ action: 'craft', name: 'wooden_hoe' });
+  check(/创造模式不用合成/.test(crafted), `合成：说了不用（${crafted.slice(0, 60)}）`);
+
   begin('创造模式：字符图的门上下两半都在');
   await session.act({ action: 'template', name: 'cabin' });
   const cabin = { x: C.x + 12, y: C.y, z: C.z - 3 };
@@ -880,9 +891,10 @@ async function creativeCases(): Promise<void> {
   await sleep(1500);
   check((await countGhosts()) === 0, '盖完草稿虚影撤了');
 
-  begin('look：周围地形的俯视图（海边的真实地形）');
-  await rcon(`tp ${NAME} 1025 75 1045`);
-  await sleep(4000);
+  begin('look：周围地形的俯视图（场地旁边的真实地形）');
+  // 场地旁边的自然地形（从高处落下去）
+  await rcon(`tp ${NAME} ${X + 40} 140 ${Z + 40}`);
+  await sleep(8000);
   const looked = await session.act({ action: 'look' });
   const map = (session as any).takeImage();
   note(looked.replace(/\n/g, ' | ').slice(0, 400));
@@ -893,7 +905,7 @@ async function creativeCases(): Promise<void> {
 
   begin('创造模式：日志记下了盖好的建筑');
   const book = await session.act({ action: 'journal' });
-  check(/「穹顶塔」在 \(1060, 201, 1000\)，盖完了/.test(book), '穹顶塔记进了日志');
+  check(book.includes(`「穹顶塔」在 (${C.x}, ${C.y}, ${C.z})，盖完了`), '穹顶塔记进了日志');
 
   // 收拾：拆掉盖的东西，切回生存（后面的测试是生存的）
   for (let y = C.y - 2; y <= C.y + 42; y++) await rcon(`fill ${C.x - 52} ${y} ${C.z - 22} ${C.x + 20} ${y} ${C.z + 22} air`);

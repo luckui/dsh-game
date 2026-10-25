@@ -220,7 +220,7 @@ export class MinecraftSession implements GameSession {
 
   constructor(private readonly options: MinecraftOptions) {
     this.facts = [
-      ...(options.creative ? ['【创造模式】这局是创造模式：方块随便用、不会少，不会饿、不会受伤，能飞：go 去远一点的地方身体会飞过去（海上、天上都行）。build 不用材料，整座建筑从下往上一层层长出来（几秒到一分钟）；采集、合成、种地这些用不着。'] : []),
+      ...(options.creative ? ['【创造模式】这局是创造模式：方块随便用、不会少，不会饿、不会受伤，能飞：go 去远一点的地方身体会飞过去（海上、天上都行）。build 不用材料，整座建筑从下往上一层层长出来（几秒到一分钟）；要用的东西（锄头、种子、桶、方块……）身体从创造物品栏直接拿，不用采集、合成。'] : []),
       `【游戏】Minecraft（Java 版，${options.creative ? '创造' : '生存'}模式）。你以玩家 ${options.username} 的身份在一个服务器里，自己决定玩什么、怎么玩。`,
       '【你的身体】你下的动作由身体去做：采集、合成、走路、打怪这些要花时间的事在后台做，game_act 会马上回来，做完或卡住了在下一个时刻告诉你，原因写在里面。'
         + '身体一次做一件事：身体在忙时再下的长动作会排队，按顺序做；想马上换成别的事，先 stop（停下正在做的，并清空排队）。饿了自己吃、被怪打会还手、掉进水里会往上游，这些不用你管。',
@@ -330,6 +330,11 @@ export class MinecraftSession implements GameSession {
     const name = action.name?.trim().toLowerCase().replace(/^minecraft:/, '').replace(/\s+/g, '_') ?? '';
     const count = Math.max(1, Math.min(64, Math.round(action.index ?? 1)));
     const xyz = parseXyz(action.text) ?? (action.action === 'build' ? this.sites.get(action.name?.trim() ?? '')?.origin ?? null : null);
+    // 创造模式：要用的东西从创造物品栏直接拿（和真人一样），不用采集、合成
+    if (this.options.creative) {
+      if (action.action === 'craft' || action.action === 'collect') return `创造模式不用${action.action === 'craft' ? '合成' : '采集'}：要用什么，身体会从创造物品栏直接拿（种地的锄头和种子、桶、打火石、要放的方块……）。`;
+      await this.creativeStock(action.action, name);
+    }
     // 去做别的事了：摄像机回到她身上（飞到草稿附近看它不算：离草稿 64 格以内的 go 摄像机接着拍草稿）
     const nearDraft = action.action === 'go' && !!xyz && !!this.director && Math.hypot(xyz.x - this.director.center.x, xyz.z - this.director.center.z) <= 64;
     if (!nearDraft && !['design', 'template', 'view', 'site', 'build', 'show', 'look', 'journal', 'mark', 'goal', 'chat'].includes(action.action)) this.stopDirecting();
@@ -376,7 +381,12 @@ export class MinecraftSession implements GameSession {
         // 她：东南边斜上方，离开它的大小那么远，看得到全貌
         const d = size * 0.9 + 6;
         const spot = { x: Math.round(center.x + d * 0.7), y: Math.round(b.y + bp.height * 0.7 + 3), z: Math.round(center.z + d * 0.7) };
-        const flown = await this.body('go_to', { position: spot, range: 1 }, 90_000).catch(() => null);
+        let flown = await this.body('go_to', { position: spot, range: 1 }, 90_000).catch(() => null);
+        // 创造模式飞不过去（屋里、山洞里出不来）：直接挪过去，这一下本来就是给镜头的
+        if (flown?.outcome !== 'succeeded' && this.options.creative && this.options.rcon) {
+          await rcon(this.options.rcon, `tp ${this.options.username} ${spot.x + 0.5} ${spot.y} ${spot.z + 0.5}`).catch(() => {});
+          flown = { outcome: 'succeeded' } as MinecraftActionResult;
+        }
         if (this.options.rcon) await rcon(this.options.rcon, `execute as ${this.options.username} at @s run tp @s ~ ~ ~ facing ${center.x.toFixed(1)} ${center.y.toFixed(1)} ${center.z.toFixed(1)}`).catch(() => {});
         this.directAround(center, size, bp.height, 62_000);
         const there = flown?.outcome === 'succeeded' ? `你在 ${fmtXyz(spot)}，面朝它` : '没飞到看它的地方，摄像机还是会去拍它';
@@ -558,6 +568,23 @@ export class MinecraftSession implements GameSession {
       return { actionId: running.id, outcome: r.failed.length ? 'partial' : 'succeeded', summary, durationMs, inventoryDelta: {}, worldChanges: [], observations: [] };
     };
     void run().then((r) => this.finishRunning(running, r), (err: Error) => this.finishRunning(running, null, err.message));
+  }
+
+  /** 创造模式：这件事要用的东西放进背包（服务器 give；创造物品栏本来什么都有） */
+  private async creativeStock(act: string, name: string): Promise<void> {
+    const target = this.options.rcon;
+    if (!target || (!name && act !== 'shear')) return;
+    const items: [string, number][] = act === 'farm' ? [['iron_hoe', 1], [name, 64]]
+      : act === 'bucket' || act === 'use' || act === 'equip' ? [[name, 1]]
+        : act === 'place' ? [[name, 64]]
+          : act === 'shear' ? [['shears', 1]]
+            : [];
+    const have = this.snapshot?.body?.inventory ?? {};
+    const missing = items.filter(([item, count]) => (have[item] ?? 0) < Math.min(count, 1));
+    if (!missing.length) return;
+    await rconBatch(target, missing.map(([item, count]) => `give ${this.options.username} minecraft:${item} ${count}`)).catch(() => {});
+    // 等身体那边的背包跟上
+    await new Promise((r) => setTimeout(r, 600));
   }
 
   /** 一座盖过的建筑在哪：日志里最近一次盖它的位置（要有它的图纸） */

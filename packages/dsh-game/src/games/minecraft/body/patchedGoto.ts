@@ -1,5 +1,6 @@
 import type { Bot } from 'mineflayer';
 import { Vec3 } from 'vec3';
+import { flyTo } from './flight.js';
 
 const SPRINT_SPEED = 5.6;
 const JUMP_TIME = 0.6;
@@ -104,7 +105,36 @@ function coordinate(value: any): { x: number; y: number; z: number } {
   };
 }
 
-export function patchedGoto(
+/**
+ * 走过去；创造模式下走不到（隔着海、在半空、在房顶上）就飞过去：目标是一个具体的格子时，飞到它上面那格。
+ * 种地、挖坑、用桶、放方块……要走到某处的动作都走这里
+ */
+export async function patchedGoto(
+  bot: Bot | any,
+  goal: any,
+  options: {
+    onProgress?: (info: PathfindProgressInfo) => void;
+    signal?: AbortSignal;
+  } = {},
+): Promise<PathfindResult> {
+  const walked = await walkGoto(bot, goal, options);
+  if (walked.ok || options.signal?.aborted || bot.game?.gameMode !== 'creative' || ![goal?.x, goal?.y, goal?.z].every(Number.isFinite)) return walked;
+  const started = Date.now();
+  const flown = await flyTo(bot, { x: goal.x, y: goal.y + 1, z: goal.z }, options.signal).catch((err: Error) => ({ ok: false, message: err.message }));
+  if (!flown.ok) return walked;
+  const here = bot.entity.position;
+  return {
+    ...walked,
+    ok: true,
+    reason: 'success',
+    message: flown.message,
+    endPos: { x: here.x, y: here.y, z: here.z },
+    distanceToTarget: Math.hypot(here.x - goal.x, here.y - goal.y, here.z - goal.z),
+    elapsedMs: walked.elapsedMs + Date.now() - started,
+  };
+}
+
+function walkGoto(
   bot: Bot | any,
   goal: any,
   options: {

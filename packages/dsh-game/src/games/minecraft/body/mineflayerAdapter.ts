@@ -2425,7 +2425,11 @@ export function createMineflayerAdapter(
         let flown = await flyTo(current, position, options.signal).catch((err: Error) => ({ ok: false, message: err.message }));
         // 头顶被挡着（屋里、山洞、水下）：先走到附近头顶开阔的地方再飞
         for (const spot of flown.ok ? [] : openSkySpots(current)) {
-          const walked = await patchedGoto(current, new goals.GoalBlock(spot.x, spot.y, spot.z), { signal: options.signal });
+          // 屋里出不来多半是门关着：走出去这一段允许开门
+          const movements = current.pathfinder.movements;
+          const couldOpen = movements.canOpenDoors;
+          movements.canOpenDoors = true;
+          const walked = await patchedGoto(current, new goals.GoalBlock(spot.x, spot.y, spot.z), { signal: options.signal }).finally(() => { movements.canOpenDoors = couldOpen; });
           if (!walked.ok) continue;
           flown = await flyTo(current, position, options.signal).catch((err: Error) => ({ ok: false, message: err.message }));
           break;

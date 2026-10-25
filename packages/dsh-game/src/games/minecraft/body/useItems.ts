@@ -180,6 +180,11 @@ export async function digAt(bot: any, req: { position: { x: number; y: number; z
     await bot.dig(bot.blockAt(target), true);
     await sleep(300);
     await pickup(4).catch(() => {});
+    // 掉下来的东西还在飞、掉进刚挖的坑里：等一下再捡一次
+    if (JSON.stringify(counts(bot)) === JSON.stringify(before)) {
+      await sleep(800);
+      await pickup(4).catch(() => {});
+    }
     const now = bot.blockAt(target)?.name ?? 'unknown';
     const water = /water/.test(now) ? '; water flowed into it' : '';
     return result(started, before, bot, 'succeeded', `dug out the ${block.name} at ${fmt(target)}${water}`);
