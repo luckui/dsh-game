@@ -1,4 +1,5 @@
 import type { TerrainScan } from '../terrain.js';
+import type { FollowPose } from '../followCam.js';
 import type {
   MinecraftActionInstruction,
   MinecraftActionName,
@@ -83,6 +84,8 @@ export interface MinecraftBodyAdapter {
   hide(signal: AbortSignal): Promise<MinecraftActionResult>;
   /** 原版 HUD 上的东西：血、饱食度、盔甲、氧气、经验、快捷栏（摄像机窗口上的 HUD 层用） */
   hudState(): MinecraftHudState | null;
+  /** 跟拍镜头这一步该在哪（见 followCam.ts）；reset = 从头算（镜头刚被别的事占过、她被传送了）。没连上是 null */
+  followCam(reset: boolean): FollowPose | null;
   /** 这些名字里哪些不是这个版本能放的方块：名字 → 说明（附相近的名字） */
   checkBlocks(names: string[]): Record<string, string>;
   /** 周围的地形（每一列的地面高度和方块，见 terrain.ts） */

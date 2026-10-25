@@ -21,6 +21,7 @@ import { breedAnimals, farmPlot, harvestCrops, shearSheep } from './farming.js';
 import { digAt as digOne, useBucket, useOnBlock } from './useItems.js';
 import { flyTo, openSkySpots } from './flight.js';
 import { scanTerrain } from './terrain.js';
+import { FollowCam } from './followCam.js';
 import { placeBlockAt as airiPlaceBlockAt, breakBlockAt, isInteractive, isReplaceableForPlacement, type PlaceFace } from './placeBlock.js';
 import { Vec3 } from 'vec3';
 import { runAdaptiveCollection } from './collectionStrategy.js';
@@ -191,6 +192,8 @@ export function createMineflayerAdapter(
   let knownCraftingTable: Vec3 | undefined;
   let lastBreathablePosition: { x: number; y: number; z: number } | undefined;
   let oxygenEmergencyActive = false;
+  /** 跟拍镜头的机位（摄像机客户端挂在一个展示实体上，游戏层每 0.1 秒来问一次） */
+  const followCam = new FollowCam();
   let followWatchdog: ReturnType<typeof setInterval> | undefined;
   let gazePoller: ReturnType<typeof setInterval> | undefined;
   const gazeTracker = new PlayerGazeTracker({
@@ -2561,6 +2564,24 @@ export function createMineflayerAdapter(
       bot.closeWindow(window);
     },
 
+    followCam(reset) {
+      const current = bot;
+      if (!current?.entity?.position) return null;
+      if (reset) followCam.reset();
+      const pos = current.entity.position;
+      return followCam.step({
+        now: Date.now(),
+        pos: { x: pos.x, y: pos.y, z: pos.z },
+        lookYaw: Number(current.entity.yaw ?? 0),
+        solid: (x, y, z) => current.blockAt?.(new Vec3(x, y, z))?.boundingBox === 'block',
+        // 火把、花草：没有碰撞箱，不挡视线，但镜头停在里面画面上就是一大块火把；没加载的当空的
+        clutter: (x, y, z) => {
+          const block = current.blockAt?.(new Vec3(x, y, z));
+          return !!block && block.boundingBox !== 'block' && !CAMERA_SEE_THROUGH.has(block.name);
+        },
+      });
+    },
+
     hudState() {
       if (!bot?.entity) return null;
       const slots: any[] = bot.inventory?.slots ?? [];
@@ -3750,6 +3771,9 @@ async function collectSugarCane(
     request.signal.removeEventListener('abort', cancel);
   }
 }
+
+/** 跟拍镜头能停在里面的方块 */
+const CAMERA_SEE_THROUGH = new Set(['air', 'cave_air', 'void_air', 'water', 'bubble_column', 'light']);
 
 /**
  * mineflayer 4.39 收到任何实体的 entity_metadata，只要带 air_supply 就写进 bot.oxygenLevel（entities.js 没核对是不是她自己），

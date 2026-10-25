@@ -324,7 +324,7 @@ export function apply(ctx: HostContext, config: LiveConfig = {}): void {
 
   route('/api/dsh-game/state', ['GET'], () => new Response(JSON.stringify(games.state()), { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } }), 'dsh-game state');
 
-  // 切换游戏客户端的视角（Minecraft 摄像机：first / back / front）
+  // 切换游戏客户端的视角（Minecraft 摄像机：follow 跟拍 / first / back / front）
   route('/api/dsh-game/view', ['POST'], async (request) => {
     const mode = new URL(request.url).searchParams.get('mode') ?? '';
     const result = (await games.session?.setClientView?.(mode)) ?? '没有能切视角的游戏';

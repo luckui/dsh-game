@@ -10,6 +10,7 @@ export type MinecraftAction =
   | 'task-release'
   | 'follow'
   | 'hud-state'
+  | 'follow-cam'
   | 'check-blocks'
   | 'terrain'
   | 'stop';

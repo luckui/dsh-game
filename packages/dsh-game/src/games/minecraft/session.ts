@@ -15,7 +15,8 @@ import type { GameAction, GameActionSpec, GameSession, LiveSource, Moment, RunEv
 import type { MinecraftActionResult, MinecraftEnvironmentSnapshot, MinecraftHudState, MinecraftObservedEntity } from './body/contracts.js';
 import type { MinecraftRuntimeEvent, MinecraftStatus } from './body/protocol.js';
 import { MinecraftRuntimeManager } from './body/runtimeManager.js';
-import { rcon, rconBatch, type RconTarget } from './rcon.js';
+import { RconLink, rcon, rconBatch, type RconTarget } from './rcon.js';
+import type { FollowPose } from './body/followCam.js';
 import { CameraClient, findJava, findMinecraftRoot } from './camera.js';
 import { TEMPLATES, clearCells, describeBlueprint, ghostCells, layerSlice, materials, outlineCells, parseBlueprint, placements, type Blueprint, type ParseResult } from './blueprint.js';
 import { GhostBuild } from './ghost.js';
@@ -55,6 +56,8 @@ export interface MinecraftOptions {
 
 /** 隔多久把旁观者重新挂一次（对方按了 Shift 被甩开时，最多这么久就挂回来） */
 const RESPECTATE_MS = 30_000;
+/** 跟拍镜头多久挪一次（镜头实体的 teleport_duration 是 3 刻 = 0.15 秒：总在往最新的位置滑，不会停一下再走） */
+const FOLLOW_MS = 100;
 
 type JournalMeta =
   | { kind: 'build'; name: string; origin: { x: number; y: number; z: number } }
@@ -197,10 +200,26 @@ export class MinecraftSession implements GameSession {
   }
   private hudTimer: NodeJS.Timeout | null = null;
   private hudBusy = false;
-  /** 新开的摄像机挂稳以后切到背后视角（只切这一次） */
+  /** 新开的摄像机挂稳以后切到主人选的视角（只切这一次） */
   private defaultViewSet = false;
-  /** 摄像机的人称（F5 三档循环：她的视角 → 背后 → 正面）；新开的客户端是她的视角 */
-  perspective: 'first' | 'back' | 'front' = 'first';
+  /**
+   * 主人选的视角：跟拍（默认：摄像机挂在一个跟着她走的展示实体上，机位见 body/followCam.ts），
+   * 或者原版的三档（她的视角、背后、正面：往摄像机窗口按 F5）
+   */
+  private view: 'follow' | 'first' | 'back' | 'front' = 'follow';
+  get perspective(): string {
+    return this.view;
+  }
+  /** 摄像机客户端现在的人称（F5 三档循环：她的视角 → 背后 → 正面）；新开的客户端是她的视角。跟拍时是她的视角（看的是镜头实体的眼睛） */
+  private f5: 'first' | 'back' | 'front' = 'first';
+  /** 跟拍的镜头实体在哪（null = 摄像机直接挂在她身上：刚开、她钻进了太窄的地方、刚被传送） */
+  private followRig: { x: number; y: number; z: number } | null = null;
+  private followTimer: NodeJS.Timeout | null = null;
+  private followBusy = false;
+  private followReset = false;
+  /** 摄像机刚进服、刚重新挂到她身上：等客户端加载好周围再放镜头实体 */
+  private followPausedUntil = 0;
+  private followLink: RconLink | null = null;
   private cameraSeen = false;
   private lastCameraCheck = 0;
   /** 上一次看到她的位置（看她有没有一下子跑远） */
@@ -638,6 +657,7 @@ export class MinecraftSession implements GameSession {
     const fresh = !this.director;
     if (this.director) clearInterval(this.director.timer);
     if (fresh) {
+      this.followRig = null;
       void rconBatch(target, [
         'kill @e[type=item_display,tag=dsh_cam]',
         `execute as ${this.cameraName} run spectate`,
@@ -767,6 +787,11 @@ export class MinecraftSession implements GameSession {
     this.unsubscribe = null;
     if (this.hudTimer) clearInterval(this.hudTimer);
     this.hudTimer = null;
+    if (this.followTimer) clearInterval(this.followTimer);
+    this.followTimer = null;
+    this.followLink?.close();
+    this.followLink = null;
+    this.followRig = null;
     this.camera?.stop();
     this.camera = null;
     const runtime = this.runtime;
@@ -945,7 +970,8 @@ export class MinecraftSession implements GameSession {
       this.cameraNote = `没开摄像机客户端：没找到装好的 Minecraft ${version}（在插件设置里填 .minecraft 目录，用 HMCL 或官方启动器装好这个版本）。`;
       return;
     }
-    this.perspective = 'first';
+    this.f5 = 'first';
+    this.followRig = null;
     this.defaultViewSet = false;
     this.camera = new CameraClient({
       root, version, username: cam.name, host: this.options.host, port: this.options.port,
@@ -955,6 +981,7 @@ export class MinecraftSession implements GameSession {
     try {
       await this.camera.start();
       this.hudTimer ??= setInterval(() => void this.pushHud(), HUD_MS);
+      this.followTimer ??= setInterval(() => void this.followStep(), FOLLOW_MS);
       this.cameraNote = `她的画面在摄像机客户端窗口里（${cam.name}，跟着她的视角）。直播时 OBS 抓这个窗口${cam.hudPort ? `，血量、快捷栏这些用浏览器源 http://127.0.0.1:${cam.hudPort}/ 叠在上面（和窗口一样大）` : ''}。`;
     } catch (err) {
       this.camera = null;
@@ -983,17 +1010,73 @@ export class MinecraftSession implements GameSession {
     }
   }
 
-  /** 切换摄像机的人称：按需要的次数发 F5 */
+  /** 主人切视角：跟拍，或者原版的她的视角 / 背后 / 正面 */
   async setClientView(mode: string): Promise<string> {
-    const order = ['first', 'back', 'front'] as const;
-    const want = order.indexOf(mode as (typeof order)[number]);
-    if (want < 0) return `没有这个视角：${mode}`;
+    const views = ['follow', 'first', 'back', 'front'] as const;
+    if (!views.includes(mode as (typeof views)[number])) return `没有这个视角：${mode}`;
     if (!this.camera?.running) return '摄像机客户端没开。';
-    const presses = (want - order.indexOf(this.perspective) + 3) % 3;
-    if (presses && !(await this.camera.pressKey(0x74, 0x3f, presses))) return '没能给摄像机窗口发按键。';
-    this.perspective = order[want];
+    const view = mode as (typeof views)[number];
+    if (view === 'follow') {
+      if (!(await this.pressF5('first'))) return '没能给摄像机窗口发按键。';
+      this.followReset = true;
+    } else {
+      // 从跟拍切回原版：摄像机先回到她身上
+      if (this.view === 'follow' && !this.director) void this.reattachCamera();
+      if (!(await this.pressF5(view))) return '没能给摄像机窗口发按键。';
+    }
+    this.view = view;
     this.options.onStateChange?.();
     return 'ok';
+  }
+
+  /** 摄像机客户端切到这个人称：按需要的次数发 F5 */
+  private async pressF5(want: 'first' | 'back' | 'front'): Promise<boolean> {
+    const order = ['first', 'back', 'front'] as const;
+    const presses = (order.indexOf(want) - order.indexOf(this.f5) + 3) % 3;
+    if (presses && !(await this.camera?.pressKey(0x74, 0x3f, presses))) return false;
+    this.f5 = want;
+    return true;
+  }
+
+  /**
+   * 跟拍的一步：问身体镜头该在哪（body/followCam.ts），挪镜头实体。
+   * 镜头实体和导播用的是同一种（item_display，标签 dsh_cam）：导播在拍别的地方时不动；
+   * 机位一下子换到另一边、她被传送：杀掉旧的、在新机位放一个再挂上（直接切，不从墙里穿过去）；
+   * 太窄放不下镜头：摄像机挂回她身上（她的视角），有地方了再放
+   */
+  private async followStep(): Promise<void> {
+    const target = this.options.rcon;
+    if (this.view !== 'follow' || this.director || !target || !this.camera?.running || !this.cameraSeen || !this.runtime || this.disconnected || this.followBusy) return;
+    if (Date.now() < this.followPausedUntil) return;
+    this.followBusy = true;
+    try {
+      const reset = this.followReset;
+      this.followReset = false;
+      const pose = await this.runtime.command<FollowPose | null>('follow-cam', { reset }, 1000).catch(() => null);
+      if (!pose || this.view !== 'follow' || this.director || Date.now() < this.followPausedUntil) return;
+      const link = (this.followLink ??= new RconLink(target));
+      const cam = this.cameraName;
+      if (pose.first) {
+        if (this.followRig) {
+          this.followRig = null;
+          link.send(`execute as ${cam} run spectate`);
+          link.send('kill @e[type=item_display,tag=dsh_cam]');
+          link.send(`spectate ${this.options.username} ${cam}`);
+        }
+        return;
+      }
+      const xyz = `${pose.x.toFixed(2)} ${pose.y.toFixed(2)} ${pose.z.toFixed(2)}`;
+      if (!this.followRig || pose.cut) {
+        link.send('kill @e[type=item_display,tag=dsh_cam]');
+        link.send(`execute at ${this.options.username} run summon item_display ${xyz} {teleport_duration:3,Rotation:[${pose.yaw.toFixed(1)}f,${pose.pitch.toFixed(1)}f],Tags:["dsh_cam"]}`);
+        link.send(`spectate @e[type=item_display,tag=dsh_cam,limit=1] ${cam}`);
+      } else {
+        link.send(`tp @e[type=item_display,tag=dsh_cam,limit=1] ${xyz} ${pose.yaw.toFixed(1)} ${pose.pitch.toFixed(1)}`);
+      }
+      this.followRig = { x: pose.x, y: pose.y, z: pose.z };
+    } finally {
+      this.followBusy = false;
+    }
   }
 
   /** 摄像机进服了：切成旁观；挂到她身上由 keepCameraAttached 负责（刚进服还在加载地形时挂不上） */
@@ -1002,6 +1085,7 @@ export class MinecraftSession implements GameSession {
     if (!target) return;
     await rcon(target, `gamemode spectator ${this.cameraName}`).catch(() => {});
     this.lastCameraCheck = 0;
+    this.followPausedUntil = Date.now() + 8000;
   }
 
   /** 摄像机重新挂一次：先放开，传送到她身边，等客户端加载好周围，再挂上 */
@@ -1009,7 +1093,14 @@ export class MinecraftSession implements GameSession {
     const target = this.options.rcon;
     if (!target || !this.cameraSeen) return;
     this.lastCameraCheck = Date.now();
-    await rconBatch(target, [`execute as ${this.cameraName} run spectate`, `tp ${this.cameraName} ${this.options.username}`]).catch(() => {});
+    // 跟拍的镜头实体先收掉，等摄像机在她身边加载好了再放（导播的不动：导播放手时自己收）
+    const dropRig = this.view === 'follow' && !this.director;
+    if (dropRig) {
+      this.followRig = null;
+      this.followReset = true;
+      this.followPausedUntil = Date.now() + 4000;
+    }
+    await rconBatch(target, [`execute as ${this.cameraName} run spectate`, ...(dropRig ? ['kill @e[type=item_display,tag=dsh_cam]'] : []), `tp ${this.cameraName} ${this.options.username}`]).catch(() => {});
     await new Promise((r) => setTimeout(r, 1500));
     await rcon(target, `spectate ${this.options.username} ${this.cameraName}`).catch(() => {});
   }
@@ -1023,12 +1114,18 @@ export class MinecraftSession implements GameSession {
     this.lastCameraCheck = Date.now();
     const reply = await rcon(target, `data get entity ${this.cameraName} Pos`).catch(() => '');
     const nums = reply.match(/-?\d+(\.\d+)?(?=d)/g)?.map(Number);
-    const attached = nums && nums.length >= 3 && Math.hypot(nums[0] - me.x, nums[1] - me.y, nums[2] - me.z) < 2;
-    if (!attached) await rcon(target, `spectate ${this.options.username} ${this.cameraName}`).catch(() => {});
-    // 第一次挂稳：默认切到背后的第三人称（能看到她自己在干什么），之后主人怎么切就怎么样
+    // 跟拍时摄像机挂在镜头实体上（离她几格）：看离实体近不近；没挂上就把实体作废，下一步重新放一个、重新挂
+    const rig = this.view === 'follow' ? this.followRig : null;
+    const at = rig ?? me;
+    const attached = nums && nums.length >= 3 && Math.hypot(nums[0] - at.x, nums[1] - at.y, nums[2] - at.z) < (rig ? 3 : 2);
+    if (!attached) {
+      if (rig) this.followRig = null;
+      else await rcon(target, `spectate ${this.options.username} ${this.cameraName}`).catch(() => {});
+    }
+    // 第一次挂稳：切到主人选的视角（跟拍时客户端就是第一人称，不用按）
     if (attached && !this.defaultViewSet) {
       this.defaultViewSet = true;
-      await this.setClientView('back');
+      if (this.view !== 'follow') await this.pressF5(this.view);
     }
   }
 

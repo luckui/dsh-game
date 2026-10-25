@@ -27,6 +27,7 @@ export interface WorkerController {
   cancelAction(actionId: string): Promise<unknown>;
   follow(payload: any): Promise<unknown>;
   hudState(): unknown;
+  followCam(payload: any): unknown;
   checkBlocks(payload: any): unknown;
   terrain(payload: any): unknown;
   stop(): Promise<unknown>;
@@ -89,6 +90,8 @@ async function runCommand(
       return controller.follow(command.payload);
     case 'hud-state':
       return controller.hudState();
+    case 'follow-cam':
+      return controller.followCam(command.payload);
     case 'check-blocks':
       return controller.checkBlocks(command.payload);
     case 'terrain':
@@ -539,6 +542,9 @@ export function createRuntimeWorkerController(
     },
     hudState() {
       return adapter.hudState();
+    },
+    followCam(payload: { reset?: boolean }) {
+      return adapter.followCam(!!payload?.reset);
     },
     terrain(payload: { radius?: number }) {
       return adapter.terrain(payload.radius ?? 32);

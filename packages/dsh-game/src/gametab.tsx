@@ -295,7 +295,7 @@ function ClientScreen({ title, note, perspective }: { title: string; note: strin
     const res = await fetch(`/api/dsh-game/view?mode=${mode}`, { method: 'POST' }).catch(() => null);
     if (!res?.ok) setError((await res?.text().catch(() => '')) || '切换失败');
   };
-  const views: [string, string][] = [['first', '她的视角'], ['back', '背后'], ['front', '正面']];
+  const views: [string, string][] = [['follow', '跟拍'], ['first', '她的视角'], ['back', '背后'], ['front', '正面']];
   const viewButtons = perspective && (
     <div className="dg-client-views">
       {views.map(([mode, label]) => (

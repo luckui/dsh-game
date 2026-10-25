@@ -10,6 +10,16 @@ export interface RconTarget {
   password: string;
 }
 
+function packet(id: number, type: number, body: string): Buffer {
+  const b = Buffer.from(body, 'utf8');
+  const buf = Buffer.alloc(14 + b.length);
+  buf.writeInt32LE(10 + b.length, 0);
+  buf.writeInt32LE(id, 4);
+  buf.writeInt32LE(type, 8);
+  b.copy(buf, 12);
+  return buf;
+}
+
 export function rcon(target: RconTarget, command: string, timeoutMs = 5000): Promise<string> {
   return rconBatch(target, [command], timeoutMs).then((replies) => replies[0]);
 }
@@ -19,15 +29,6 @@ export function rconBatch(target: RconTarget, commands: string[], timeoutMs = 50
   if (!commands.length) return Promise.resolve([]);
   return new Promise((resolve, reject) => {
     const sock = net.connect(target.port, target.host);
-    const packet = (id: number, type: number, body: string) => {
-      const b = Buffer.from(body, 'utf8');
-      const buf = Buffer.alloc(14 + b.length);
-      buf.writeInt32LE(10 + b.length, 0);
-      buf.writeInt32LE(id, 4);
-      buf.writeInt32LE(type, 8);
-      b.copy(buf, 12);
-      return buf;
-    };
     let data = Buffer.alloc(0);
     let authed = false;
     const replies: string[] = [];
@@ -58,4 +59,66 @@ export function rconBatch(target: RconTarget, commands: string[], timeoutMs = 50
       }
     });
   });
+}
+
+/**
+ * 一直开着的 RCON 连接，只管发、不等回音（跟拍镜头一秒十来条 tp）。
+ * 每条新开一个连接的话，服务器每次都往日志里写两行「RCON Client 开了 / 关了」，远程服务器上每条还要多等一次握手；
+ * 断了就丢掉，下次发的时候重连（连上之前最多攒几条，旧的丢掉：镜头只要最新的位置）
+ */
+export class RconLink {
+  private sock: net.Socket | null = null;
+  private ready = false;
+  private pending: string[] = [];
+  private seq = 10;
+  /** 密码不对：不再重连 */
+  private refused = false;
+
+  constructor(private readonly target: RconTarget) {}
+
+  send(command: string): void {
+    if (this.ready && this.sock) {
+      this.sock.write(packet(++this.seq, 2, command));
+      return;
+    }
+    if (this.refused) return;
+    this.pending.push(command);
+    if (this.pending.length > 8) this.pending.shift();
+    if (!this.sock) this.open();
+  }
+
+  close(): void {
+    this.sock?.destroy();
+    this.sock = null;
+    this.ready = false;
+    this.pending = [];
+  }
+
+  private open(): void {
+    const sock = net.connect(this.target.port, this.target.host);
+    this.sock = sock;
+    let data = Buffer.alloc(0);
+    // 3 秒还没握完手（服务器卡住、连接没回音）：丢掉，下次发的时候重连
+    const giveUp = setTimeout(() => { if (!this.ready && this.sock === sock) sock.destroy(); }, 3000);
+    sock.on('connect', () => sock.write(packet(1, 3, this.target.password)));
+    sock.on('data', (chunk) => {
+      data = Buffer.concat([data, chunk]);
+      while (data.length >= 4 && data.length >= data.readInt32LE(0) + 4) {
+        const id = data.readInt32LE(4);
+        data = data.subarray(4 + data.readInt32LE(0));
+        if (this.ready || this.sock !== sock) continue;
+        clearTimeout(giveUp);
+        if (id === -1) { this.refused = true; sock.destroy(); continue; }
+        this.ready = true;
+        for (const command of this.pending.splice(0)) sock.write(packet(++this.seq, 2, command));
+      }
+    });
+    sock.on('error', () => {});
+    sock.on('close', () => {
+      clearTimeout(giveUp);
+      if (this.sock !== sock) return;
+      this.sock = null;
+      this.ready = false;
+    });
+  }
 }
