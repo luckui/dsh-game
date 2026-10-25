@@ -832,6 +832,24 @@ async function creativeCases(): Promise<void> {
   const ghosts2 = Number((await rcon('execute if entity @e[type=block_display,tag=dsh_ghost]')).match(/count:\s*(\d+)/i)?.[1] ?? 0);
   check(ghosts2 === 0, `停下以后虚影撤了（还剩 ${ghosts2}）`);
 
+  begin('site：选好地方放出草稿虚影，改图纸虚影跟着变，build 不写坐标就盖在那里');
+  const countGhosts = async () => Number((await rcon('execute if entity @e[type=block_display,tag=dsh_ghost]')).match(/count:\s*(\d+)/i)?.[1] ?? 0);
+  await session.act({ action: 'design', name: '小亭子', text: 'materials: S=stone_bricks Q=quartz_block\nbox S from -2 0 -2 to 2 0 2\nbox Q from -2 1 -2 to -2 3 -2\nbox Q from 2 1 -2 to 2 3 -2\nbox Q from -2 1 2 to -2 3 2\nbox Q from 2 1 2 to 2 3 2\npyramid S center 0 4 0 radius 3 height 3' });
+  const spot = { x: C.x - 10, y: C.y, z: C.z - 8 };
+  const sited = await session.act({ action: 'site', name: '小亭子', text: `${spot.x} ${spot.y} ${spot.z}` });
+  note(sited);
+  const g1 = await countGhosts();
+  check(/虚影/.test(sited) && g1 > 20, `放出了草稿虚影（${g1} 块）`);
+  const redesigned = await session.act({ action: 'design', name: '小亭子', text: 'materials: S=stone_bricks Q=quartz_block\nbox S from -3 0 -3 to 3 0 3\nbox Q from -3 1 -3 to -3 4 -3\nbox Q from 3 1 -3 to 3 4 -3\nbox Q from -3 1 3 to -3 4 3\nbox Q from 3 1 3 to 3 4 3\npyramid S center 0 5 0 radius 4 height 4' });
+  (session as any).takeImage();
+  await sleep(1000);
+  const g2 = await countGhosts();
+  check(/虚影/.test(redesigned) && g2 > g1, `改大以后虚影跟着变了（${g1} → ${g2} 块）`);
+  const builtAtSite = await act('build', { name: '小亭子' }, 120_000);
+  check(/：做完了/.test(builtAtSite) && /passed/i.test(await rcon(`execute if block ${spot.x + 3} ${spot.y + 4} ${spot.z + 3} quartz_block`)), `不写坐标盖在了选好的地方（${builtAtSite.slice(0, 80)}）`);
+  await sleep(1500);
+  check((await countGhosts()) === 0, '盖完草稿虚影撤了');
+
   begin('look：周围地形的俯视图（海边的真实地形）');
   await rcon(`tp ${NAME} 1025 75 1045`);
   await sleep(4000);

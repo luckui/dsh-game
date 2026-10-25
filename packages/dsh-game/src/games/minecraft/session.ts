@@ -17,7 +17,7 @@ import type { MinecraftRuntimeEvent, MinecraftStatus } from './body/protocol.js'
 import { MinecraftRuntimeManager } from './body/runtimeManager.js';
 import { rcon, rconBatch, type RconTarget } from './rcon.js';
 import { CameraClient, findJava, findMinecraftRoot } from './camera.js';
-import { TEMPLATES, clearCells, describeBlueprint, ghostCells, layerSlice, materials, parseBlueprint, placements, type Blueprint, type ParseResult } from './blueprint.js';
+import { TEMPLATES, clearCells, describeBlueprint, ghostCells, layerSlice, materials, outlineCells, parseBlueprint, placements, type Blueprint, type ParseResult } from './blueprint.js';
 import { GhostBuild } from './ghost.js';
 import { isShapeText, parseShapes } from './shapes.js';
 import { placeLayers, worldBase } from './creative.js';
@@ -102,7 +102,8 @@ const ACTIONS: GameActionSpec[] = [
   { action: 'template', description: `看一张常见建筑的参考图纸（存成同名图纸：可以直接 build，也可以照着改了再 design）：${Object.entries(TEMPLATES).map(([id, t]) => `${id}（${t.title}）`).join('、')}`, params: { name: '参考图纸的名字' } },
   { action: 'design', description: '交一张自己画的图纸，看它的正面、侧面、俯视三张投影、材料清单和问题（不会动手盖）。格式：先写「图例：」，每行「字符 方块的英文 id」，楼梯、门这类可以跟 facing=north/south/east/west（放的时候人朝哪边）、half=top/bottom；再写「第1层：」「第2层：」……从下往上一层层画。每层第一行在最北边，往下一行往南一格；每行从左往右是从西往东。「.」是空气（那里原来有东西会挖掉），空格是不管（原来是什么留着什么）。门在上下两层画同一个字符。最大宽 16、深 16、高 12。', params: { name: '给图纸起个名字', text: '图纸' } },
   { action: 'view', description: '看一张图纸某一层的切片（从上往下看这一层，上面是北）：圆顶、塔里面是不是空的、门洞开在哪，投影看不出来时用', params: { name: '图纸的名字', index: '第几层（从下往上数，从 1 开始）' } },
-  { action: 'build', description: '照一张图纸盖起来（后台做）：材料不够会告诉你缺多少；够不着的地方身体会垫方块爬上去，盖完拆掉；每盖完一层告诉你一声', params: { name: '图纸的名字（先 design 或 template 过）', text: '坐标「x y z」：图纸第 1 层第一行第一格（西北角、最下面那格）放在哪' } },
+  { action: 'site', description: '给一张图纸选好地方：那里会出现它的虚影（看的人能看到你的设计，摄像机会去看它），之后用 design 改同名图纸，虚影跟着变；build 不写坐标就盖在这里', params: { name: '图纸的名字', text: '坐标「x y z」：图纸放在哪（和 build 的坐标一样）' } },
+  { action: 'build', description: '照一张图纸盖起来（后台做；用 site 选过地方的可以不写坐标）：材料不够会告诉你缺多少；够不着的地方身体会垫方块爬上去，盖完拆掉；每盖完一层告诉你一声', params: { name: '图纸的名字（先 design 或 template 过）', text: '坐标「x y z」：图纸第 1 层第一行第一格（西北角、最下面那格）放在哪' } },
   { action: 'farm', description: '开一块地种上（后台做）：清掉地上的草、用锄头锄成耕地、播种。要有锄头（任何材质）和种子；耕地 4 格内有水才长得快（没有水会告诉你）', params: { name: '种子：wheat_seeds（小麦）、carrot、potato、beetroot_seeds（甜菜）', text: '坐标「x y z」：地的西北角（地面那格）', index: '边长（默认 3，最大 9）' } },
   { action: 'harvest', description: '收附近 16 格内熟了的庄稼，捡起来，再补种回去（后台做）；没熟的会告诉你长到第几阶段了', params: { name: '只收哪种：wheat、carrots、potatoes、beetroots（不填就都收）' } },
   { action: 'breed', description: '拿饲料喂附近的动物让它们生小的（后台做）：牛、羊吃 wheat，猪吃 carrot / potato / beetroot，鸡吃种子；喂过的动物 5 分钟后才能再生', params: { name: '动物的英文 id，比如 cow、sheep、pig、chicken', index: '喂几对（默认 1）' } },
@@ -171,6 +172,10 @@ export class MinecraftSession implements GameSession {
   private camera: CameraClient | null = null;
   /** 她画好的图纸：名字 → 图纸（这局里一直在） */
   private designs = new Map<string, Blueprint>();
+  /** 选好的地方：图纸名 → 坐标和那里的虚影（草稿）。改同名图纸虚影跟着变；build 不写坐标就盖在这里 */
+  private sites = new Map<string, { origin: { x: number; y: number; z: number }; ghost: GhostBuild | null }>();
+  /** 导播：摄像机离开她，绕着草稿 / 正在盖的建筑慢慢转（她去做别的事、盖完一会儿、太久没动静就回到她身上） */
+  private director: { timer: NodeJS.Timeout; until: number } | null = null;
   /** 图纸渲染图用的方块颜色（没装客户端就是 null） */
   private colors: BlockColors | null | undefined;
   /** 刚做完的那件事附带的图（game_act 取走） */
@@ -291,8 +296,11 @@ export class MinecraftSession implements GameSession {
     if (!ACTIONS.some((a) => a.action === action.action)) return `没有这个动作：${action.action}。\n${formatActionList()}`;
     if (!this.runtime || !this.status?.connected) return '还没进游戏（先 game_start）。';
     if (['collect', 'craft', 'smelt', 'go_to_player', 'follow', 'attack', 'find', 'equip', 'drop', 'place', 'farm', 'breed', 'mark', 'bucket', 'use'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
-    if (['go', 'place', 'build', 'farm', 'bucket', 'use', 'dig'].includes(action.action) && !parseXyz(action.text)) return `${action.action} 要在 text 里填坐标「x y z」。`;
-    if (['template', 'design', 'build', 'view'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
+    if (['go', 'place', 'build', 'farm', 'bucket', 'use', 'dig', 'site'].includes(action.action) && !parseXyz(action.text)
+      && !(action.action === 'build' && this.sites.has(action.name?.trim() ?? ''))) return `${action.action} 要在 text 里填坐标「x y z」。`;
+    if (['template', 'design', 'build', 'view', 'site'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
+    if (action.action === 'site' && !this.designs.has(action.name!.trim())) return `还没有叫「${action.name}」的图纸：先 design 交一张。`;
+    if (action.action === 'site' && !this.options.rcon) return '服务器没开 RCON，放不了虚影（开局设置里填 RCON 密码）。';
     if (action.action === 'view' && !this.designs.has(action.name!.trim())) return `还没有叫「${action.name}」的图纸。`;
     if (action.action === 'design' && !action.text?.trim()) return 'design 要在 text 里放图纸。';
     if (action.action === 'template' && !TEMPLATES[action.name!.trim()]) return `没有这张参考图纸：${action.name}。有：${Object.keys(TEMPLATES).join('、')}`;
@@ -312,7 +320,9 @@ export class MinecraftSession implements GameSession {
     if (!runtime) return '还没进游戏。';
     const name = action.name?.trim().toLowerCase().replace(/^minecraft:/, '').replace(/\s+/g, '_') ?? '';
     const count = Math.max(1, Math.min(64, Math.round(action.index ?? 1)));
-    const xyz = parseXyz(action.text);
+    const xyz = parseXyz(action.text) ?? (action.action === 'build' ? this.sites.get(action.name?.trim() ?? '')?.origin ?? null : null);
+    // 去做别的事了：摄像机回到她身上
+    if (!['design', 'template', 'view', 'site', 'build', 'look', 'journal', 'mark', 'goal', 'chat'].includes(action.action)) this.stopDirecting();
     switch (action.action) {
       case 'goal':
         this.goal = action.text!.trim();
@@ -334,6 +344,7 @@ export class MinecraftSession implements GameSession {
           this.designs.set(title, parsed.blueprint);
           this.journal?.saveDesign(title, text);
         }
+        const sited = !unknown.length && this.sites.has(title) ? await this.showDraft(title, this.sites.get(title)!.origin) : '';
         const preview = describeBlueprint(title, parsed.blueprint, parsed.warnings, unknown);
         const have = this.snapshot?.body?.inventory ?? {};
         const short = Object.entries(materials(parsed.blueprint)).filter(([n, c]) => (have[n] ?? 0) < c).map(([n, c]) => `${n} 还差 ${c - (have[n] ?? 0)}`);
@@ -342,8 +353,13 @@ export class MinecraftSession implements GameSession {
         return [
           action.action === 'template' ? `参考图纸 ${title}：${TEMPLATES[title].title}\n${text}\n` : '',
           preview,
-          unknown.length ? '' : `存好了，可以 build ${title}。${enough}${parsed.blueprint.offset ? `用 view 看切片（共 ${parsed.blueprint.height} 层）。` : ''}${picture}`,
+          unknown.length ? '' : `存好了，可以 build ${title}。${enough}${parsed.blueprint.offset ? `用 view 看切片（共 ${parsed.blueprint.height} 层）。` : ''}${picture}${sited}`,
         ].filter(Boolean).join('\n');
+      }
+      case 'site': {
+        const title = action.name!.trim();
+        const shown = await this.showDraft(title, xyz!);
+        return `「${title}」的地方选在 ${fmtXyz(xyz!)}。${shown}之后用 design 改「${title}」，虚影跟着变；build ${title} 不写坐标就盖在这里。`;
       }
       case 'look': {
         const scan = await runtime.command<TerrainScan>('terrain', { radius: 32 }, 20_000);
@@ -418,6 +434,12 @@ export class MinecraftSession implements GameSession {
     if (action.action === 'build' && this.options.rcon) {
       const title = action.name!.trim();
       const label = `盖「${title}」`;
+      const site = this.sites.get(title);
+      if (site) {
+        await site.ghost?.clear();
+        this.sites.delete(title);
+      }
+      this.directAt(this.designs.get(title)!, xyz!);
       await this.ghosts.get(label)?.clear();
       const ghost = new GhostBuild(this.options.rcon, `b${++this.ghostSeq}`, this.options.log);
       this.ghosts.set(label, ghost);
@@ -511,6 +533,59 @@ export class MinecraftSession implements GameSession {
     void run().then((r) => this.finishRunning(running, r), (err: Error) => this.finishRunning(running, null, err.message));
   }
 
+  /** 在选好的地方放出（或换上）这张图纸的虚影；摄像机去看它。返回给她的一句话 */
+  private async showDraft(title: string, origin: { x: number; y: number; z: number }): Promise<string> {
+    const target = this.options.rcon;
+    const bp = this.designs.get(title);
+    if (!target || !bp) return '';
+    const old = this.sites.get(title);
+    await old?.ghost?.clear();
+    const ghost = new GhostBuild(target, `d${++this.ghostSeq}`, this.options.log);
+    let cells = ghostCells(bp, origin);
+    let note = '那里出现了它的虚影。';
+    if (cells.length > GHOST_MAX) {
+      cells = outlineCells(bp, origin);
+      note = '它太大了，那里只画出外框的轮廓线。';
+    }
+    await ghost.show(cells);
+    this.sites.set(title, { origin, ghost });
+    this.directAt(bp, origin);
+    return note;
+  }
+
+  /** 导播：摄像机离开她，从东南边斜上方绕着这块地慢慢转（一圈一分钟） */
+  private directAt(bp: Blueprint, origin: { x: number; y: number; z: number }): void {
+    const target = this.options.rcon;
+    if (!target || !this.cameraName || !this.cameraSeen) return;
+    const b = worldBase(bp, origin);
+    const center = { x: b.x + bp.width / 2, y: b.y + bp.height / 2, z: b.z + bp.depth / 2 };
+    const size = Math.max(bp.width, bp.depth, bp.height);
+    const radius = size * 1.1 + 8;
+    const lift = Math.max(bp.height * 0.6, radius * 0.45);
+    const start = Date.now();
+    if (this.director) clearInterval(this.director.timer);
+    void rcon(target, `execute as ${this.cameraName} run spectate`).catch(() => {});
+    const step = () => {
+      if (!this.director) return;
+      if (Date.now() > this.director.until) { this.stopDirecting(); return; }
+      const angle = Math.PI / 4 + ((Date.now() - start) / 60_000) * Math.PI * 2;
+      const x = center.x + radius * Math.cos(angle);
+      const z = center.z + radius * Math.sin(angle);
+      void rcon(target, `tp ${this.cameraName} ${x.toFixed(2)} ${(center.y + lift).toFixed(2)} ${z.toFixed(2)} facing ${center.x.toFixed(2)} ${center.y.toFixed(2)} ${center.z.toFixed(2)}`).catch(() => {});
+    };
+    // 太久没动静（3 分钟）就回到她身上；盖的时候盖完再延
+    this.director = { timer: setInterval(step, 200), until: Date.now() + 180_000 };
+    step();
+  }
+
+  /** 摄像机回到她身上 */
+  private stopDirecting(): void {
+    if (!this.director) return;
+    clearInterval(this.director.timer);
+    this.director = null;
+    void this.reattachCamera();
+  }
+
   /** 画一张图纸的渲染图，等 game_act 取走；画不了（没装客户端）返回 false */
   private preview(bp: Blueprint): boolean {
     this.loadColors();
@@ -585,6 +660,10 @@ export class MinecraftSession implements GameSession {
   async stop(): Promise<void> {
     this.finished = true;
     this.saveLast();
+    if (this.director) clearInterval(this.director.timer);
+    this.director = null;
+    for (const site of this.sites.values()) await site.ghost?.clear();
+    this.sites.clear();
     await this.clearGhosts();
     if (this.poller) clearInterval(this.poller);
     this.poller = null;
@@ -627,6 +706,7 @@ export class MinecraftSession implements GameSession {
   }
 
   private finishRunning(running: Running, result: MinecraftActionResult | null, error?: string): void {
+    if (running.meta?.kind === 'build' && this.director) this.director.until = Math.min(this.director.until, Date.now() + 5_000);
     // 这次盖完了（成没成都一样）：剩下的虚影撤掉
     const ghost = this.ghosts.get(running.label);
     if (ghost) {
@@ -727,7 +807,8 @@ export class MinecraftSession implements GameSession {
     const here = s?.body?.position;
     const jumped = !!here && !!this.lastBodyPos && Math.hypot(here.x - this.lastBodyPos.x, here.y - this.lastBodyPos.y, here.z - this.lastBodyPos.z) > 24;
     if (here) this.lastBodyPos = { x: here.x, y: here.y, z: here.z };
-    if (jumped || moved) void this.reattachCamera();
+    if (this.director) { /* 导播在拍别的地方：不拉回她身上 */ }
+    else if (jumped || moved) void this.reattachCamera();
     else void this.keepCameraAttached();
     // 新出现在 12 格内的敌对生物（同一只只报一次）
     for (const e of hostiles(s).filter((h) => h.distance <= 12)) {

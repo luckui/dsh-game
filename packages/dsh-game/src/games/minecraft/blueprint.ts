@@ -217,6 +217,18 @@ export function ghostCells(bp: Blueprint, at0: { x: number; y: number; z: number
   });
 }
 
+/** 很大的图纸：只画外框的 12 条棱（虚影放不下整座时用） */
+export function outlineCells(bp: Blueprint, at0: { x: number; y: number; z: number }): Placement[] {
+  const o = base(bp, at0);
+  const [x2, y2, z2] = [o.x + bp.width - 1, o.y + bp.height - 1, o.z + bp.depth - 1];
+  const out = new Map<string, Placement>();
+  const add = (x: number, y: number, z: number) => out.set(`${x},${y},${z}`, { x, y, z, name: 'white_stained_glass', props: {} });
+  for (let x = o.x; x <= x2; x++) for (const y of [o.y, y2]) for (const z of [o.z, z2]) add(x, y, z);
+  for (let y = o.y; y <= y2; y++) for (const x of [o.x, x2]) for (const z of [o.z, z2]) add(x, y, z);
+  for (let z = o.z; z <= z2; z++) for (const x of [o.x, x2]) for (const y of [o.y, y2]) add(x, y, z);
+  return [...out.values()];
+}
+
 /** 要用的材料：方块名 → 个数（门按扇算） */
 export function materials(bp: Blueprint): Record<string, number> {
   const out: Record<string, number> = {};
