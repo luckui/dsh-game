@@ -92,6 +92,7 @@ const ACTIONS: GameActionSpec[] = [
   { action: 'harvest', description: '收附近 16 格内熟了的庄稼，捡起来，再补种回去（后台做）；没熟的会告诉你长到第几阶段了', params: { name: '只收哪种：wheat、carrots、potatoes、beetroots（不填就都收）' } },
   { action: 'breed', description: '拿饲料喂附近的动物让它们生小的（后台做）：牛、羊吃 wheat，猪吃 carrot / potato / beetroot，鸡吃种子；喂过的动物 5 分钟后才能再生', params: { name: '动物的英文 id，比如 cow、sheep、pig、chicken', index: '喂几对（默认 1）' } },
   { action: 'shear', description: '用剪刀剪附近羊的羊毛（后台做）；剪过的羊吃了草才会长回来', params: { index: '剪几只（默认 3）' } },
+  { action: 'dig', description: '挖掉指定的那一格（后台做）：挖坑、挖水渠、拆东西，掉的东西会捡起来；挖开会让岩浆流进来的不挖', params: { text: '坐标「x y z」' } },
   { action: 'bucket', description: '用桶（后台做）：空桶（bucket）装起那一格的水或岩浆（要是源头，流动的装不起来）；水桶、岩浆桶倒在那一格（那一格要空着）。会告诉你倒完以后那里和旁边变成了什么', params: { name: 'bucket、water_bucket 或 lava_bucket', text: '坐标「x y z」' } },
   { action: 'use', description: '拿着一样东西对一格方块用一下（后台做），比如打火石点火、骨粉催熟', params: { name: '手里拿的东西的英文 id，比如 flint_and_steel', text: '坐标「x y z」：对着这一格方块的上面用' } },
   { action: 'mark', description: '在这个世界的日志里记一个地点（家、矿洞、村庄……），下次来还能找到；同名的会换成新位置', params: { name: '地点的名字', text: '坐标「x y z」（不填就是你现在站的地方）；填「删掉」就把这个地点从日志里删了' } },
@@ -100,7 +101,7 @@ const ACTIONS: GameActionSpec[] = [
   { action: 'stop', description: '停下正在做的事' },
 ];
 
-const LONG = new Set(['collect', 'craft', 'smelt', 'go', 'go_to_player', 'attack', 'pickup', 'hide', 'flee', 'sleep', 'build', 'farm', 'harvest', 'breed', 'shear', 'bucket', 'use']);
+const LONG = new Set(['collect', 'craft', 'smelt', 'go', 'go_to_player', 'attack', 'pickup', 'hide', 'flee', 'sleep', 'build', 'farm', 'harvest', 'breed', 'shear', 'bucket', 'use', 'dig']);
 
 const ERROR_TEXT: Record<string, string> = {
   not_connected: '还没进游戏',
@@ -260,7 +261,7 @@ export class MinecraftSession implements GameSession {
     if (!ACTIONS.some((a) => a.action === action.action)) return `没有这个动作：${action.action}。\n${formatActionList()}`;
     if (!this.runtime || !this.status?.connected) return '还没进游戏（先 game_start）。';
     if (['collect', 'craft', 'smelt', 'go_to_player', 'follow', 'attack', 'find', 'equip', 'drop', 'place', 'farm', 'breed', 'mark', 'bucket', 'use'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
-    if (['go', 'place', 'build', 'farm', 'bucket', 'use'].includes(action.action) && !parseXyz(action.text)) return `${action.action} 要在 text 里填坐标「x y z」。`;
+    if (['go', 'place', 'build', 'farm', 'bucket', 'use', 'dig'].includes(action.action) && !parseXyz(action.text)) return `${action.action} 要在 text 里填坐标「x y z」。`;
     if (['template', 'design', 'build'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
     if (action.action === 'design' && !action.text?.trim()) return 'design 要在 text 里放图纸。';
     if (action.action === 'template' && !TEMPLATES[action.name!.trim()]) return `没有这张参考图纸：${action.name}。有：${Object.keys(TEMPLATES).join('、')}`;
@@ -399,6 +400,7 @@ export class MinecraftSession implements GameSession {
         }
         case 'harvest': return ['harvest_crops', { crop: name || undefined, radius: 16, replant: true }, `收${name ? ` ${name}` : '庄稼'}`];
         case 'breed': return ['breed_animals', { animal: name, pairs: Math.min(4, count) }, `喂 ${name} 繁殖`];
+        case 'dig': return ['dig_at', { position: xyz }, `挖掉 ${fmtXyz(xyz!)}`];
         case 'bucket': return ['use_bucket', { item: name, position: xyz }, name === 'bucket' ? `用桶装 ${fmtXyz(xyz!)} 的东西` : `把 ${name} 倒在 ${fmtXyz(xyz!)}`];
         case 'use': return ['use_on_block', { item: name, position: xyz, face: 'top' }, `对 ${fmtXyz(xyz!)} 用 ${name}`];
         case 'shear': return ['shear_sheep', { count: Math.min(16, action.index ? count : 3) }, '剪羊毛'];

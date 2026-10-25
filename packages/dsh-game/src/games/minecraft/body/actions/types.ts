@@ -94,6 +94,8 @@ export interface MinecraftBodyAdapter {
   /** 用桶（装 / 倒）、对一格方块用手里的东西（见 useItems.ts） */
   useBucket(options: { item: string; position: { x: number; y: number; z: number }; signal: AbortSignal }): Promise<MinecraftActionResult>;
   useOnBlock(options: { item: string; position: { x: number; y: number; z: number }; face?: string; signal: AbortSignal }): Promise<MinecraftActionResult>;
+  /** 挖掉指定的那一格（见 useItems.ts） */
+  digAt(options: { position: { x: number; y: number; z: number }; signal: AbortSignal }): Promise<MinecraftActionResult>;
   /** 还开着的界面（熔炉、箱子、工作台……）关掉，鼠标上拿着的东西先放回背包 */
   closeStrayWindow(): Promise<void>;
   /** 苦力怕反射：躲开附近的苦力怕（跑开约 8 格） */

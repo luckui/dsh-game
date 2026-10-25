@@ -18,7 +18,7 @@ import { gatherWood } from './gatherWood.js';
 import { fleeFromHostiles, hideUnderground, sleepInBed, swimToShore } from './survival.js';
 import { buildStructure } from './build.js';
 import { breedAnimals, farmPlot, harvestCrops, shearSheep } from './farming.js';
-import { useBucket, useOnBlock } from './useItems.js';
+import { digAt as digOne, useBucket, useOnBlock } from './useItems.js';
 import { placeBlockAt as airiPlaceBlockAt, breakBlockAt, isInteractive, isReplaceableForPlacement, type PlaceFace } from './placeBlock.js';
 import { Vec3 } from 'vec3';
 import { runAdaptiveCollection } from './collectionStrategy.js';
@@ -2512,6 +2512,10 @@ export function createMineflayerAdapter(
 
     async useOnBlock(options) {
       return useOnBlock(requireBot(bot), options);
+    },
+
+    async digAt(options) {
+      return digOne(requireBot(bot), options, async (radius) => { await collectItemDrops(radius, options.signal); });
     },
 
     async closeStrayWindow() {

@@ -150,3 +150,40 @@ export async function useOnBlock(bot: any, req: { item: string; position: { x: n
     return result(started, before, bot, req.signal.aborted ? 'cancelled' : 'failed', (err as Error).message, 'path_unreachable');
   }
 }
+
+/**
+ * 挖掉指定的那一格（挖坑、挖水渠、拆东西）：走过去、换上合适的工具、挖、捡掉落物。
+ * 挖开会让岩浆流进来的不挖；旁边是水的照挖（挖水渠就是要水流进来），挖完告诉她水流进来了。
+ * 要特定工具才掉东西的（石头、矿、黑曜石）手里没有就不挖，说要什么工具。
+ */
+export async function digAt(bot: any, req: { position: { x: number; y: number; z: number }; signal: AbortSignal }, pickup: (radius: number) => Promise<void>): Promise<MinecraftActionResult> {
+  const started = Date.now();
+  const before = counts(bot);
+  const target = new Vec3(Math.floor(req.position.x), Math.floor(req.position.y), Math.floor(req.position.z));
+  const block = bot.blockAt(target);
+  if (!block) return result(started, before, bot, 'failed', `${fmt(target)} is not loaded`, 'target_not_found');
+  if (block.boundingBox === 'empty' && !/grass|fern|flower|bush|crop|wheat|carrots|potatoes|beetroots|sapling|snow|vine|torch/.test(block.name)) {
+    return result(started, before, bot, 'failed', `${fmt(target)} is already ${block.name}; nothing to dig`, 'target_not_found');
+  }
+  if (/bedrock|barrier|end_portal_frame|command_block/.test(block.name)) return result(started, before, bot, 'failed', `${block.name} cannot be broken`, 'blocked');
+  const lavaNext = [new Vec3(0, 1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)]
+    .map((d) => target.plus(d)).find((p) => /lava/.test(bot.blockAt(p)?.name ?? ''));
+  if (lavaNext) return result(started, before, bot, 'failed', `did not dig ${block.name} at ${fmt(target)}: lava at ${fmt(lavaNext)} would flow in`, 'unsafe');
+  const harvestable = !block.harvestTools || (bot.inventory?.items?.() ?? []).some((i: any) => block.canHarvest?.(i.type));
+  if (!harvestable) {
+    const tools = Object.keys(block.harvestTools).map((id) => bot.registry.items[Number(id)]?.name).filter(Boolean);
+    return result(started, before, bot, 'failed', `${block.name} drops nothing without ${tools.slice(0, 3).join(' / ')}${tools.length > 3 ? ' (or better)' : ''}`, 'missing_tool');
+  }
+  try {
+    await reach(bot, target, req.signal);
+    await bot.tool?.equipForBlock?.(block, {}).catch?.(() => {});
+    await bot.dig(bot.blockAt(target), true);
+    await sleep(300);
+    await pickup(4).catch(() => {});
+    const now = bot.blockAt(target)?.name ?? 'unknown';
+    const water = /water/.test(now) ? '; water flowed into it' : '';
+    return result(started, before, bot, 'succeeded', `dug out the ${block.name} at ${fmt(target)}${water}`);
+  } catch (err) {
+    return result(started, before, bot, req.signal.aborted ? 'cancelled' : 'failed', (err as Error).message, 'path_unreachable');
+  }
+}

@@ -116,6 +116,15 @@ export function createProductionActions(): MinecraftActionHandler[] {
       },
     },
     {
+      name: 'dig_at',
+      async run(instruction, context) {
+        const position = positionArg(instruction.args.position);
+        if (!position) throw new Error('Missing Minecraft action argument: position');
+        const result = await context.adapter.digAt({ position, signal: context.signal });
+        return { ...result, actionId: instruction.id };
+      },
+    },
+    {
       name: 'smelt_item',
       async run(instruction, context) {
         const item = typeof instruction.args.item === 'string' ? instruction.args.item.trim() : undefined;

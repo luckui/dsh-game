@@ -36,6 +36,7 @@ export type MinecraftActionName =
   | 'shear_sheep'
   | 'use_bucket'
   | 'use_on_block'
+  | 'dig_at'
   | 'place_block'
   | 'break_block'
   | 'execute_blueprint'

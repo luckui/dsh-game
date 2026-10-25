@@ -500,6 +500,18 @@ async function farmCases(): Promise<void> {
   await rcon(`give ${NAME} shears 1`);
   await sleep(800);
   await step('shear', { index: 2 }, { ok: /：做完了/, atLeast: { white_wool: 2 } });
+
+  begin('挖坑引水：dig 挖掉指定那一格，再倒水（胡萝卜地旁边）');
+  await rcon(`give ${NAME} water_bucket 1`);
+  await sleep(800);
+  await step('dig', { text: `${X + 5} ${Y} ${Z + 3}` }, { ok: /：做完了/, gain: { dirt: 1 } });
+  check(/passed/i.test(await rcon(`execute if block ${X + 5} ${Y} ${Z + 3} air`)), '那一格挖空了');
+  await step('bucket', { name: 'water_bucket', text: `${X + 5} ${Y} ${Z + 3}` }, { ok: /：做完了/, gain: { water_bucket: -1, bucket: 1 } });
+  check(/passed/i.test(await rcon(`execute if block ${X + 5} ${Y} ${Z + 3} water[level=0]`)), '坑里是一格水源（胡萝卜地有水了）');
+  await rcon(`setblock ${X + 6} ${Y + 1} ${Z + 6} stone`);
+  await sleep(500);
+  const stone = await act('dig', { text: `${X + 6} ${Y + 1} ${Z + 6}` });
+  check(/没成/.test(stone) && /wooden_pickaxe/.test(stone), `没镐子挖石头：说要什么镐（${stone.slice(0, 140)}）`);
   await rcon(`kill @e[type=!player,x=${X},y=${Y},z=${Z},distance=..40]`);
 }
 
