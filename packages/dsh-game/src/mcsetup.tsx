@@ -1,6 +1,7 @@
 /**
  * Minecraft 的开局设置（游戏库里选中 Minecraft 时，横幅下面）：玩法、服务器、她的名字、摄像机客户端。
  *   - 玩法两张卡：单人（她自己玩，你在旁边看）；和你一起玩是下一阶段，先放着、点不了
+ *   - 游戏模式：生存 / 创造（创造要 RCON）
  *   - 文字框离开时保存，开关点了就保存；存完宿主重新检查一遍（/api/dsh-game/mc-setup）
  *   - 每一项检查一行 ✓ / ✗：服务器连没连上（什么版本、几个人在线）、名字、客户端、Java、RCON、HUD 网页
  *   - 有问题时「让大肥鱼玩」按钮不能点，并写出原因
@@ -12,6 +13,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 
 interface McSetup {
   mode: 'solo' | 'duo';
+  gameMode: 'survival' | 'creative';
   ownerName: string;
   host: string;
   port: number;
@@ -156,6 +158,17 @@ export function McSetupPanel({ onCheck }: { onCheck: (check: McSetupCheck | null
         </button>
       </div>
 
+      <div className="dg-mc-modes dg-mc-gamemodes" role="radiogroup" aria-label="游戏模式">
+        <button type="button" className="dg-mc-mode" role="radio" aria-checked={setup.gameMode === 'survival'} data-on={setup.gameMode === 'survival' ? '' : undefined} disabled={busy} onClick={() => save({ gameMode: 'survival' })}>
+          <b>生存</b>
+          <small>自己砍树、挖矿、合成，盖房子要材料，天黑有怪</small>
+        </button>
+        <button type="button" className="dg-mc-mode" role="radio" aria-checked={setup.gameMode === 'creative'} data-on={setup.gameMode === 'creative' ? '' : undefined} disabled={busy} onClick={() => save({ gameMode: 'creative' })}>
+          <b>创造</b>
+          <small>方块随便用、能飞，她设计的建筑一层层长出来 · 要开 RCON</small>
+        </button>
+      </div>
+
       <div className="dg-mc-cols">
         <div className="dg-mc-group">
           <h3>服务器</h3>
@@ -190,7 +203,15 @@ export function McSetupPanel({ onCheck }: { onCheck: (check: McSetupCheck | null
               <Field label="Java 21" value={setup.java} placeholder="不填：自动找 HMCL / 官方启动器带的" disabled={busy} onSave={(v) => save({ java: v })} />
             </>
           ) : (
-            <p className="dg-mc-note">不开的话，你用自己的客户端进服、切旁观模式看她（/gamemode spectator，再 /spectate 她的名字）。</p>
+            <>
+              <p className="dg-mc-note">不开的话，你用自己的客户端进服、切旁观模式看她（/gamemode spectator，再 /spectate 她的名字）。</p>
+              {setup.gameMode === 'creative' && (
+                <div className="dg-mc-row">
+                  <Field label="RCON 端口" value={setup.rconPort} type="number" disabled={busy} onSave={(v) => save({ rconPort: num(v) })} />
+                  <Field label="RCON 密码" value={setup.rconPassword} type="password" hint="创造模式要用：server.properties 里的 rcon.password" disabled={busy} onSave={(v) => save({ rconPassword: v })} />
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -233,6 +254,8 @@ export const MC_SETUP_CSS = `
 .dg-mc-mode small{font-size:11px;line-height:1.5;color:rgba(222,240,226,.6)}
 .dg-mc-mode[data-on]{background:rgba(123,211,107,.12);border-color:var(--grass);box-shadow:inset 3px 0 0 var(--grass)}
 .dg-mc-mode:disabled:not([data-on]){opacity:.5}
+.dg-mc-gamemodes{margin-top:0}
+.dg-mc-gamemodes .dg-mc-mode{cursor:pointer}
 .dg-mc-cols{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
 @media (max-width:760px){.dg-mc-cols,.dg-mc-modes{grid-template-columns:1fr}}
 .dg-mc-group{display:flex;flex-direction:column;gap:10px;min-width:0}

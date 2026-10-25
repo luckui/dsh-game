@@ -15,7 +15,7 @@ import { MinecraftSession } from '../src/games/minecraft/session.js';
 import { rcon as rconRaw, type RconTarget } from '../src/games/minecraft/rcon.js';
 
 const ROOT = path.resolve(process.argv[2] ?? '.');
-/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量）、build（盖房子）、farm（种地、养动物）、journal（世界日志）、nether（桶、黑曜石、下界传送门）、不填 = 全部 */
+/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量）、build（盖房子）、farm（种地、养动物）、journal（世界日志）、nether（桶、黑曜石、下界传送门）、creative（形状图纸、创造模式一层层盖）、不填 = 全部 */
 const SUITE = process.argv[3] ?? 'all';
 const props = Object.fromEntries(
   fs.readFileSync(path.join(ROOT, '.mc-server', 'server.properties'), 'utf8').split(/\r?\n/)
@@ -704,6 +704,120 @@ async function netherCases(): Promise<void> {
   }
 }
 
+/** 形状图纸（不连服务器也能查的：尺寸、空心封闭、开口、cut、引用、出错的说法）+ 创造模式一层层盖 */
+async function creativeCases(): Promise<void> {
+  const { parseShapes } = await import('../src/games/minecraft/shapes.js');
+  const { placements } = await import('../src/games/minecraft/blueprint.js');
+  const cellsOf = (bp: any) => new Set(placements(bp, { x: 0, y: 0, z: 0 }).map((p) => `${p.x},${p.y},${p.z}`));
+  const none = () => undefined;
+
+  begin('形状：尺寸和对称');
+  let r = parseShapes('materials: Q=quartz_block\nsphere Q center 0 0 0 radius 6', none);
+  check(r.blueprint?.width === 13 && r.blueprint?.height === 13 && r.blueprint?.depth === 13, `半径 6 的球 13×13×13（${r.blueprint?.width}×${r.blueprint?.height}×${r.blueprint?.depth}）`);
+  r = parseShapes('pyramid sandstone center 0 0 0 radius 4 height 5', none);
+  check(r.blueprint?.width === 9 && r.blueprint?.height === 5, `金字塔 9 宽 5 高（${r.blueprint?.width}×${r.blueprint?.height}）`);
+
+  begin('形状：空心封闭、开口、cut、拱、引用别的图纸');
+  r = parseShapes('sphere stone center 0 0 0 radius 8 hollow 1', none);
+  const shell = cellsOf(r.blueprint!);
+  const seen = new Set(['0,0,0']);
+  const queue = [[0, 0, 0]];
+  let leaked = false;
+  while (queue.length && !leaked) {
+    const [x, y, z] = queue.pop()!;
+    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+      const n = [x + dx, y + dy, z + dz];
+      const k = n.join(',');
+      if (seen.has(k) || shell.has(k)) continue;
+      if (n.some((v) => Math.abs(v) > 10)) { leaked = true; break; }
+      seen.add(k);
+      queue.push(n);
+    }
+  }
+  check(!shell.has('0,0,0') && !leaked, `空心球：里面空、外壳不漏（外壳 ${shell.size} 块）`);
+  const tower = 'materials: S=stone_bricks Q=quartz_block\ncylinder S center 0 0 0 radius 5 height 8 hollow 1 open top\nsphere Q center 0 8 0 radius 5 top hollow 1\ncone copper_block center 0 14 0 radius 1 height 3\ncut box from -1 1 -6 to 1 3 -4';
+  r = parseShapes(tower, none);
+  const t = cellsOf(r.blueprint!);
+  check(t.has('0,0,0') && !t.has('0,5,0') && !t.has('0,9,0'), '塔有地板，塔身和穹顶里面是空的');
+  check(!t.has('0,7,0') && !t.has('0,8,0'), '塔顶（open top）和穹顶的切面都没封：塔和穹顶之间是通的');
+  check(!t.has('0,2,-5') && t.has('0,4,-5') && t.has('0,0,-5'), '门洞挖出来了（门上面、门下面还是墙）');
+  r = parseShapes('arch stone center 0 0 0 radius 3 length 5 axis x hollow 1', none);
+  const a = cellsOf(r.blueprint!);
+  check(a.has('0,3,0') && a.has('0,0,3') && !a.has('0,1,0'), '拱：拱顶有、两脚着地、拱洞里空');
+  const plank = parseShapes('box oak_planks from 0 0 0 to 1 1 0', none).blueprint!;
+  r = parseShapes('box stone from 0 0 0 to 4 0 4\nblueprint 小板 at 1 1 1', (n) => (n === '小板' ? plank : undefined));
+  const b = cellsOf(r.blueprint!);
+  check(b.has('1,1,1') && b.has('2,2,1') && b.size === 29, `blueprint 引用放对了（${b.size} 块）`);
+
+  begin('形状：写错了会说清楚');
+  for (const [text, want] of [['sphere Q center 0 0', /center/], ['sphere Z center 0 0 0 radius 2', /materials/], ['box stone from 0 0 0 to 300 1 1', /太大/], ['torus stone center 0 0 0', /box/], ['blueprint 没有的 at 0 0 0', /没有叫/]] as [string, RegExp][]) {
+    const e = parseShapes(text, none);
+    check(!e.blueprint && want.test(e.errors[0] ?? ''), `「${text}」→ ${e.errors[0]}`);
+  }
+
+  // ---- 创造模式：开一局创造模式（在原来的场地东边 60 格的空中） ----
+  begin('创造模式：开局切成创造');
+  await session.stop();
+  session = newSession(true);
+  const start = await session.start();
+  note(start.split('\n')[0]);
+  await sleep(1500);
+  check(/passed|Test passed/i.test(await rcon(`execute if entity @a[name=${NAME},gamemode=creative]`)), '她是创造模式');
+  const C = { x: X + 60, y: Y + 1, z: Z };
+  for (let y = C.y - 2; y <= C.y + 30; y++) await rcon(`fill ${C.x - 30} ${y} ${C.z - 12} ${C.x + 30} ${y} ${C.z + 12} air`);
+
+  begin('创造模式：形状图纸设计、看切片、一层层盖出来');
+  const designed = await session.act({ action: 'design', name: '穹顶塔', text: tower });
+  note(designed.split('\n').slice(0, 2).join(' | '));
+  check(/存好了/.test(designed) && /创造模式不用材料/.test(designed) && /宽 11.*深 11.*高 17/.test(designed), '存好了，11×11×17，说了不用材料');
+  const slice = await session.act({ action: 'view', name: '穹顶塔', index: 3 });
+  check(/第 3 层/.test(slice) && /S\.+S/.test(slice), `view 看得到第 3 层的切片（墙中间是空的）`);
+  const built = await act('build', { name: '穹顶塔', text: `${C.x} ${C.y} ${C.z}` }, 120_000);
+  check(/：做完了/.test(built), `盖完了（${built.slice(0, 120)}）`);
+  const is = async (dx: number, dy: number, dz: number, block: string) => /passed/i.test(await rcon(`execute if block ${C.x + dx} ${C.y + dy} ${C.z + dz} ${block}`));
+  const wall = await is(5, 3, 0, 'stone_bricks');
+  const dome = await is(0, 13, 0, 'quartz_block');
+  const spire = await is(0, 16, 0, 'copper_block');
+  if (!(wall && dome && spire)) note(`那三格现在是：${await rcon(`execute if block ${C.x + 5} ${C.y + 3} ${C.z} air`)} / ${await rcon(`execute if block ${C.x} ${C.y + 13} ${C.z} air`)} / ${await rcon(`execute if block ${C.x} ${C.y + 16} ${C.z} air`)}`);
+  check(wall && dome && spire, `墙、穹顶顶上、尖顶都在（墙 ${wall}，穹顶 ${dome}，尖顶 ${spire}）`);
+  check(await is(0, 5, 0, 'air') && await is(0, 9, 0, 'air') && await is(0, 2, -5, 'air'), '塔里面、穹顶里面、门洞是空的');
+  const ghosts = Number((await rcon('execute if entity @e[type=block_display,tag=dsh_ghost]')).match(/count:\s*(\d+)/i)?.[1] ?? 0);
+  check(ghosts === 0, `虚影撤干净了（还剩 ${ghosts}）`);
+
+  begin('创造模式：字符图的门上下两半都在');
+  await session.act({ action: 'template', name: 'cabin' });
+  const cabin = { x: C.x + 12, y: C.y, z: C.z - 3 };
+  const cabinLine = await act('build', { name: 'cabin', text: `${cabin.x} ${cabin.y} ${cabin.z}` }, 120_000);
+  check(/：做完了/.test(cabinLine), `小木屋盖完了（${cabinLine.slice(0, 100)}）`);
+  check(/passed/i.test(await rcon(`execute if block ${cabin.x + 3} ${cabin.y + 1} ${cabin.z + 5} oak_door[half=lower,facing=north]`))
+    && /passed/i.test(await rcon(`execute if block ${cabin.x + 3} ${cabin.y + 2} ${cabin.z + 5} oak_door[half=upper,facing=north]`)), '门：下半、上半都在，朝向对');
+
+  begin('创造模式：盖到一半停下');
+  const big = 'sphere glass center 0 20 0 radius 20 hollow 1';
+  check(/存好了/.test(await session.act({ action: 'design', name: '大玻璃球', text: big })), '大玻璃球（41 宽）存好了');
+  const startBig = await session.act({ action: 'build', name: '大玻璃球', text: `${C.x - 30} ${C.y} ${C.z}` });
+  note(startBig.split('\n')[0]);
+  await sleep(4000);
+  const stopped = await session.act({ action: 'stop' });
+  check(/停下了/.test(stopped), `stop 停下了（${stopped.slice(0, 60)}）`);
+  await sleep(1500);
+  const top = /passed/i.test(await rcon(`execute if block ${C.x - 30} ${C.y + 40} ${C.z} glass`));
+  check(!top, '没盖完（顶上还没有）');
+  const ghosts2 = Number((await rcon('execute if entity @e[type=block_display,tag=dsh_ghost]')).match(/count:\s*(\d+)/i)?.[1] ?? 0);
+  check(ghosts2 === 0, `停下以后虚影撤了（还剩 ${ghosts2}）`);
+
+  begin('创造模式：日志记下了盖好的建筑');
+  const book = await session.act({ action: 'journal' });
+  check(/「穹顶塔」在 \(1060, 201, 1000\)，盖完了/.test(book), '穹顶塔记进了日志');
+
+  // 收拾：拆掉盖的东西，切回生存（后面的测试是生存的）
+  for (let y = C.y - 2; y <= C.y + 42; y++) await rcon(`fill ${C.x - 52} ${y} ${C.z - 22} ${C.x + 20} ${y} ${C.z + 22} air`);
+  await session.stop();
+  session = newSession(false);
+  await session.start();
+  await rcon(`tp ${NAME} ${X} ${Y + 1} ${Z}`);
+}
+
 async function reset(): Promise<void> {
   await rcon(`clear ${NAME}`);
   await rcon(`effect clear ${NAME}`);
@@ -711,8 +825,9 @@ async function reset(): Promise<void> {
   await rcon(`kill @e[type=item,x=${X},y=${Y},z=${Z},distance=..30]`);
 }
 
-function newSession(): MinecraftSession {
+function newSession(creative = false): MinecraftSession {
   return new MinecraftSession({
+    creative,
     workerPath: path.join(ROOT, 'packages', 'dsh-game', 'lib', 'minecraft-worker.cjs'),
     host: '127.0.0.1', port: Number(props['server-port'] || 25565), username: NAME,
     record: () => {}, camera: null, rcon: RCON, journalDir: JOURNAL_DIR,
@@ -741,6 +856,7 @@ async function main(): Promise<void> {
     if (SUITE === 'all' || SUITE === 'farm') await farmCases();
     if (SUITE === 'all' || SUITE === 'journal') await journalCases();
     if (SUITE === 'all' || SUITE === 'nether') await netherCases();
+    if (SUITE === 'all' || SUITE === 'creative') await creativeCases();
   } finally {
     await session.stop().catch(() => {});
     await rcon(`forceload remove ${X - 16} ${Z - 16} ${X + 16} ${Z + 16}`);

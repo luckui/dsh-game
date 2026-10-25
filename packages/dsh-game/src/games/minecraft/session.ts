@@ -16,8 +16,10 @@ import type { MinecraftRuntimeEvent, MinecraftStatus } from './body/protocol.js'
 import { MinecraftRuntimeManager } from './body/runtimeManager.js';
 import { rcon, rconBatch, type RconTarget } from './rcon.js';
 import { CameraClient, findJava, findMinecraftRoot } from './camera.js';
-import { TEMPLATES, clearCells, describeBlueprint, ghostCells, materials, parseBlueprint, placements, type Blueprint } from './blueprint.js';
+import { TEMPLATES, clearCells, describeBlueprint, ghostCells, layerSlice, materials, parseBlueprint, placements, type Blueprint, type ParseResult } from './blueprint.js';
 import { GhostBuild } from './ghost.js';
+import { isShapeText, parseShapes } from './shapes.js';
+import { placeLayers, worldBase } from './creative.js';
 import { WorldJournal, dimensionName } from './journal.js';
 
 export interface MinecraftOptions {
@@ -40,6 +42,8 @@ export interface MinecraftOptions {
   rcon?: RconTarget | null;
   /** 世界日志放在哪（一个服务器上的一个她一本，见 journal.ts）；不给就不记 */
   journalDir?: string | null;
+  /** 创造模式（开局用 RCON 切过去；盖房子用 RCON 一层层放，见 creative.ts）。要有 rcon */
+  creative?: boolean;
 }
 
 /** 隔多久把旁观者重新挂一次（对方按了 Shift 被甩开时，最多这么久就挂回来） */
@@ -60,6 +64,8 @@ interface Running {
   inventory: Record<string, number>;
   /** 做完要记进世界日志的（盖房子、种地、睡觉） */
   meta?: JournalMeta;
+  /** 不是身体做、是这里自己做的（创造模式一层层放）：停下用它 */
+  abort?: AbortController;
 }
 
 const POLL_MS = 2000;
@@ -87,6 +93,7 @@ const ACTIONS: GameActionSpec[] = [
   { action: 'sleep', description: '睡觉跳过夜晚：附近有床就去睡，没有就放下背包里的床（只有晚上、附近没怪时能睡）（后台做）' },
   { action: 'template', description: `看一张常见建筑的参考图纸（存成同名图纸：可以直接 build，也可以照着改了再 design）：${Object.entries(TEMPLATES).map(([id, t]) => `${id}（${t.title}）`).join('、')}`, params: { name: '参考图纸的名字' } },
   { action: 'design', description: '交一张自己画的图纸，看它的正面、侧面、俯视三张投影、材料清单和问题（不会动手盖）。格式：先写「图例：」，每行「字符 方块的英文 id」，楼梯、门这类可以跟 facing=north/south/east/west（放的时候人朝哪边）、half=top/bottom；再写「第1层：」「第2层：」……从下往上一层层画。每层第一行在最北边，往下一行往南一格；每行从左往右是从西往东。「.」是空气（那里原来有东西会挖掉），空格是不管（原来是什么留着什么）。门在上下两层画同一个字符。最大宽 16、深 16、高 12。', params: { name: '给图纸起个名字', text: '图纸' } },
+  { action: 'view', description: '看一张图纸某一层的切片（从上往下看这一层，上面是北）：圆顶、塔里面是不是空的、门洞开在哪，投影看不出来时用', params: { name: '图纸的名字', index: '第几层（从下往上数，从 1 开始）' } },
   { action: 'build', description: '照一张图纸盖起来（后台做）：材料不够会告诉你缺多少；够不着的地方身体会垫方块爬上去，盖完拆掉；每盖完一层告诉你一声', params: { name: '图纸的名字（先 design 或 template 过）', text: '坐标「x y z」：图纸第 1 层第一行第一格（西北角、最下面那格）放在哪' } },
   { action: 'farm', description: '开一块地种上（后台做）：清掉地上的草、用锄头锄成耕地、播种。要有锄头（任何材质）和种子；耕地 4 格内有水才长得快（没有水会告诉你）', params: { name: '种子：wheat_seeds（小麦）、carrot、potato、beetroot_seeds（甜菜）', text: '坐标「x y z」：地的西北角（地面那格）', index: '边长（默认 3，最大 9）' } },
   { action: 'harvest', description: '收附近 16 格内熟了的庄稼，捡起来，再补种回去（后台做）；没熟的会告诉你长到第几阶段了', params: { name: '只收哪种：wheat、carrots、potatoes、beetroots（不填就都收）' } },
@@ -100,6 +107,9 @@ const ACTIONS: GameActionSpec[] = [
   { action: 'chat', description: '在游戏的聊天栏里打字（游戏里的玩家才看得到；你回复里写的话是说出口的，不会进游戏聊天）', params: { text: '要发的话' } },
   { action: 'stop', description: '停下正在做的事' },
 ];
+
+/** 虚影最多放这么多块（每块是一个实体，太多了服务器和看的人都卡） */
+const GHOST_MAX = 4000;
 
 const LONG = new Set(['collect', 'craft', 'smelt', 'go', 'go_to_player', 'attack', 'pickup', 'hide', 'flee', 'sleep', 'build', 'farm', 'harvest', 'breed', 'shear', 'bucket', 'use', 'dig']);
 
@@ -189,6 +199,7 @@ export class MinecraftSession implements GameSession {
 
   constructor(private readonly options: MinecraftOptions) {
     this.facts = [
+      ...(options.creative ? ['【创造模式】这局是创造模式：方块随便用、不会少，不会饿、不会受伤，能飞。build 不用材料，整座建筑从下往上一层层长出来（几秒到一分钟）；采集、合成、种地这些用不着。'] : []),
       `【游戏】Minecraft（Java 版，生存模式）。你以玩家 ${options.username} 的身份在一个服务器里，自己决定玩什么、怎么玩。`,
       '【你的身体】你下的动作由身体去做：采集、合成、走路、打怪这些要花时间的事在后台做，game_act 会马上回来，做完或卡住了在下一个时刻告诉你，原因写在里面。'
         + '身体一次做一件事：身体在忙时再下的长动作会排队，按顺序做；想马上换成别的事，先 stop（停下正在做的，并清空排队）。饿了自己吃、被怪打会还手、掉进水里会往上游，这些不用你管。',
@@ -197,6 +208,11 @@ export class MinecraftSession implements GameSession {
       '【目标】长期想做的事用 goal 写下来，每个时刻都会提醒你，换多少轮都不会忘。',
       '【盖房子】房子是你自己设计的：用 design 交一张图纸（图例 + 从下往上一层层的字符图），会给你看正面、侧面、俯视三张投影、材料清单和图上的问题，你看着改；满意了用 build 在一个坐标盖起来，身体照图纸一块块放。template 有几张常见建筑的参考图纸，可以照着改。',
       '【种地】锄头锄过的泥土是耕地，种子种上去过几分钟（游戏时间）一阶一阶长大；耕地离水 4 格以内长得快。熟了用 harvest 收，种子会补种回去。动物用对的饲料喂一对就会生一只小的；栅栏、羊圈可以用 design 画了 build。',
+      '【形状图纸】design 除了字符图，也能用形状写（大的、圆的、斜的用这个）。先写一行 materials: Q=quartz_block S=stone_bricks（字母=方块，方块可以带 [facing=north] 这样的状态），再一行一个形状：'
+        + 'box M from x y z to x y z；sphere M center x y z radius r（写三个数 rx ry rz 是椭球；加 top / bottom 只要上半 / 下半）；cylinder M center x y z radius r height h（底面中心，默认竖着往上；axis x / z 横着放，沿 +x / +z 方向伸长）；'
+        + 'cone M 或 pyramid M center x y z radius r height h（底面中心往上收成尖，加 down 尖朝下）；arch M center x y z radius r length l axis x 或 z（拱：半圆朝上，沿轴伸长）；line M from x y z to x y z；blueprint 图纸名 at x y z（把一张存好的图纸放在这里，西北角最下面对着这个点）。'
+        + '形状后面可以加 hollow t（空心，壁厚 t）、open top / bottom / both（空心时那一头不封口；半球和拱的切面本来就是开口）。前面加 cut 是从前面画的形状里挖掉（门洞、窗户），材料写 air 是把世界里那些格子清空。'
+        + '坐标都是方块坐标，相对于 build 时给的那个点（形状里的 0 0 0），x 往东、y 往上、z 往南；格子中心落在形状里就算（半径 6 的球 13 格宽）；后写的盖掉先写的。最大 256×256×256、100 万块。用 view 看某一层的切片。',
       '【下界】用 10 块黑曜石搭一个门框（参考图纸 nether_portal），拿打火石（flint_and_steel：1 铁锭 + 1 燧石）点门框里面最底下那块的上面，门框里会亮起紫色的传送门；走进去站一会儿就到了下界，从下界的门走回来就回到主世界。黑曜石要钻石镐才挖得动；岩浆源头碰到水会变成黑曜石，流动的岩浆碰到水变成圆石。下界到处是岩浆；床在那里一睡就会爆炸；水倒出来会马上蒸发；猪灵会打没穿金盔甲的人。',
       '【日志】每个世界有一本日志：你的目标、存好的图纸、用 mark 记的地点，还有盖过的房子、种过的地、床、死在哪，下次来这个世界还在。',
       '【说话】你回复里写的话是说出口的（主人和观众听得到）；游戏里的玩家要用 chat 才看得到。',
@@ -228,6 +244,8 @@ export class MinecraftSession implements GameSession {
     this.disconnected = false;
     // 上一局（DSH 被关掉时）可能留着虚影
     if (this.options.rcon) void GhostBuild.clearAll(this.options.rcon);
+    // 生存 / 创造：按开局设置切过去（上一局可能是另一个模式）
+    if (this.options.rcon) await rcon(this.options.rcon, `gamemode ${this.options.creative ? 'creative' : 'survival'} ${this.options.username}`).catch(() => {});
     void this.startCamera();
     for (const p of this.status.players) if (p !== this.status.username && p !== this.cameraName) this.players.add(p);
     this.options.record({ type: 'start', game: 'minecraft' });
@@ -262,7 +280,8 @@ export class MinecraftSession implements GameSession {
     if (!this.runtime || !this.status?.connected) return '还没进游戏（先 game_start）。';
     if (['collect', 'craft', 'smelt', 'go_to_player', 'follow', 'attack', 'find', 'equip', 'drop', 'place', 'farm', 'breed', 'mark', 'bucket', 'use'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
     if (['go', 'place', 'build', 'farm', 'bucket', 'use', 'dig'].includes(action.action) && !parseXyz(action.text)) return `${action.action} 要在 text 里填坐标「x y z」。`;
-    if (['template', 'design', 'build'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
+    if (['template', 'design', 'build', 'view'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
+    if (action.action === 'view' && !this.designs.has(action.name!.trim())) return `还没有叫「${action.name}」的图纸。`;
     if (action.action === 'design' && !action.text?.trim()) return 'design 要在 text 里放图纸。';
     if (action.action === 'template' && !TEMPLATES[action.name!.trim()]) return `没有这张参考图纸：${action.name}。有：${Object.keys(TEMPLATES).join('、')}`;
     if (action.action === 'build' && !this.designs.has(action.name!.trim())) {
@@ -291,7 +310,7 @@ export class MinecraftSession implements GameSession {
       case 'design': {
         const title = action.name!.trim();
         const text = action.action === 'template' ? TEMPLATES[title].text : action.text!;
-        const parsed = parseBlueprint(text);
+        const parsed = this.parseDesign(text);
         if (!parsed.blueprint) {
           return `图纸「${title}」读不了：\n- ${parsed.errors.join('\n- ')}${parsed.warnings.length ? `\n另外：\n- ${parsed.warnings.join('\n- ')}` : ''}`;
         }
@@ -305,11 +324,17 @@ export class MinecraftSession implements GameSession {
         const preview = describeBlueprint(title, parsed.blueprint, parsed.warnings, unknown);
         const have = this.snapshot?.body?.inventory ?? {};
         const short = Object.entries(materials(parsed.blueprint)).filter(([n, c]) => (have[n] ?? 0) < c).map(([n, c]) => `${n} 还差 ${c - (have[n] ?? 0)}`);
+        const enough = this.options.creative ? '创造模式不用材料。' : short.length ? `照现在的背包，材料${short.join('，')}。` : '材料够了。';
         return [
           action.action === 'template' ? `参考图纸 ${title}：${TEMPLATES[title].title}\n${text}\n` : '',
           preview,
-          unknown.length ? '' : `存好了，可以 build ${title}。${short.length ? `照现在的背包，材料${short.join('，')}。` : '材料够了。'}`,
+          unknown.length ? '' : `存好了，可以 build ${title}。${enough}${parsed.blueprint.offset ? `用 view 看切片（共 ${parsed.blueprint.height} 层）。` : ''}`,
         ].filter(Boolean).join('\n');
+      }
+      case 'view': {
+        const bp = this.designs.get(action.name!.trim())!;
+        const k = Math.max(1, Math.min(bp.height, Math.round(action.index ?? 1)));
+        return `图纸「${action.name!.trim()}」${layerSlice(bp, k)}`;
       }
       case 'mark': {
         if (!this.journal) return '这局没有世界日志（DSH 主目录不可写）。';
@@ -331,6 +356,7 @@ export class MinecraftSession implements GameSession {
         const dropped = this.queue.length;
         this.queue = [];
         this.running = null;
+        was?.abort?.abort();
         await runtime.command('stop', {});
         await this.clearGhosts();
         return was ? `停下了（原来在${was.label}${dropped ? `，排着的 ${dropped} 件也取消了` : ''}）。` : '本来就没在做什么。';
@@ -372,7 +398,9 @@ export class MinecraftSession implements GameSession {
       await this.ghosts.get(label)?.clear();
       const ghost = new GhostBuild(this.options.rcon, `b${++this.ghostSeq}`, this.options.log);
       this.ghosts.set(label, ghost);
-      await ghost.show(ghostCells(this.designs.get(title)!, xyz!));
+      const cells = ghostCells(this.designs.get(title)!, xyz!);
+      // 很大的建筑虚影太多（每块是一个实体）：只在不太多时放
+      if (cells.length <= GHOST_MAX) await ghost.show(cells);
     }
     const meta: JournalMeta | undefined = action.action === 'build' ? { kind: 'build', name: action.name!.trim(), origin: xyz! }
       : action.action === 'farm' ? { kind: 'farm', crop: name, corner: xyz!, size: Math.max(1, Math.min(9, Math.round(action.index ?? 3))) }
@@ -392,6 +420,7 @@ export class MinecraftSession implements GameSession {
         case 'build': {
           const title = action.name!.trim();
           const bp = this.designs.get(title)!;
+          if (this.options.creative) return ['creative_build', { title, origin: xyz }, `盖「${title}」`];
           return ['build_structure', { label: `「${title}」`, blocks: placements(bp, xyz!), clear: clearCells(bp, xyz!) }, `盖「${title}」`];
         }
         case 'farm': {
@@ -415,10 +444,63 @@ export class MinecraftSession implements GameSession {
     return `开始${label}。做完或卡住了会在下一个时刻告诉你。`;
   }
 
+  /** 创造模式盖房子：这里用 RCON 一层层放（不走身体），放完一层撤一层虚影 */
+  private beginCreativeBuild(title: string, origin: { x: number; y: number; z: number }, label: string, meta?: JournalMeta): void {
+    const target = this.options.rcon;
+    const bp = this.designs.get(title);
+    const abort = new AbortController();
+    const running: Running = { id: randomUUID(), label, startedAt: Date.now(), inventory: { ...(this.snapshot?.body?.inventory ?? {}) }, meta, abort };
+    this.running = running;
+    this.options.onAction?.(label);
+    this.options.record({ type: 'act', text: label });
+    const total = bp ? placements(bp, origin).length : 0;
+    const fail = (message: string): MinecraftActionResult => ({
+      actionId: running.id, outcome: 'failed', summary: message, durationMs: Date.now() - running.startedAt, inventoryDelta: {}, worldChanges: [], observations: [],
+      error: { code: 'blocked', recoverable: true, details: { message } },
+    });
+    const run = async (): Promise<MinecraftActionResult> => {
+      if (!target) return fail('creative building needs RCON');
+      if (!bp) return fail(`no blueprint called ${title}`);
+      // 她站在要盖的地方：先让她到房顶上面去（创造模式能飞），不然方块放进她身体里
+      const b0 = worldBase(bp, origin);
+      const me = this.snapshot?.body?.position;
+      if (me && me.x >= b0.x - 1 && me.x <= b0.x + bp.width && me.z >= b0.z - 1 && me.z <= b0.z + bp.depth && me.y >= b0.y - 1 && me.y <= b0.y + bp.height) {
+        await rcon(target, `tp ${this.options.username} ${b0.x + Math.floor(bp.width / 2)} ${b0.y + bp.height + 1} ${b0.z + Math.floor(bp.depth / 2)}`).catch(() => {});
+      }
+      const ghost = this.ghosts.get(label);
+      let lastQuarter = 0;
+      const r = await placeLayers(target, bp, origin, {
+        signal: abort.signal,
+        onLayer: (p) => {
+          ghost?.removeLayer(p.y);
+          const quarter = Math.floor((p.index / p.total) * 4);
+          if (p.total >= 8 && quarter > lastQuarter && quarter < 4) {
+            lastQuarter = quarter;
+            this.push(`「${title}」长到第 ${p.index}/${p.total} 层了`, false);
+          }
+        },
+      });
+      const durationMs = Date.now() - running.startedAt;
+      if (r.stopped) return { ...fail('stopped building'), outcome: 'cancelled' };
+      const summary = `「${title}」: ${total}/${total} blocks in place, ${r.layers} layers${r.failed.length ? `; some commands failed: ${r.failed.join('; ')}` : ''}`;
+      return { actionId: running.id, outcome: r.failed.length ? 'partial' : 'succeeded', summary, durationMs, inventoryDelta: {}, worldChanges: [], observations: [] };
+    };
+    void run().then((r) => this.finishRunning(running, r), (err: Error) => this.finishRunning(running, null, err.message));
+  }
+
+  /** 字符图或形状图纸（形状里可以引用已经存好的图纸） */
+  private parseDesign(text: string): ParseResult {
+    return isShapeText(text) ? parseShapes(text, (n) => this.designs.get(n)) : parseBlueprint(text);
+  }
+
   /** 身体开始做一件长动作（做完自动接着做排队的下一件） */
   private begin(bodyAction: string, args: Record<string, unknown>, label: string, meta?: JournalMeta): void {
     const runtime = this.runtime;
     if (!runtime) return;
+    if (bodyAction === 'creative_build') {
+      this.beginCreativeBuild(String(args.title), args.origin as { x: number; y: number; z: number }, label, meta);
+      return;
+    }
     const id = randomUUID();
     const running: Running = { id, label, startedAt: Date.now(), inventory: { ...(this.snapshot?.body?.inventory ?? {}) }, meta };
     this.running = running;
@@ -475,6 +557,7 @@ export class MinecraftSession implements GameSession {
     const was = this.running;
     if (!was) return null;
     this.running = null;
+    was.abort?.abort();
     await this.runtime?.command('cancel-action', { actionId: was.id }, 10_000).catch(() => {});
     await this.runtime?.command('stop', {}, 10_000).catch(() => {});
     return was.label;
@@ -761,8 +844,10 @@ export class MinecraftSession implements GameSession {
       const { journal, note } = WorldJournal.open(dir, `${this.options.host}:${this.options.port}`, this.options.username, seed);
       this.journal = journal;
       if (!this.goal && journal.goal) this.goal = journal.goal;
-      for (const d of journal.designs) {
-        const bp = parseBlueprint(d.text).blueprint;
+      // 字符图先接上，形状图纸后接（它可能引用别的图纸）；旧的先接
+      const saved = [...journal.designs].reverse();
+      for (const d of [...saved.filter((x) => !isShapeText(x.text)), ...saved.filter((x) => isShapeText(x.text))]) {
+        const bp = this.parseDesign(d.text).blueprint;
         if (bp && !this.designs.has(d.name)) this.designs.set(d.name, bp);
       }
       const intro = journal.intro();

@@ -2,6 +2,7 @@
  * Minecraft 的开局设置：玩法、服务器、她的名字、摄像机客户端。游戏库里选中 Minecraft 时的「开局设置」面板读写它，开局时按它连。
  *   - 存在 DSH 主目录的 dsh-game/minecraft-setup.json，只有这一份。旧版插件设置里的 mc* 只在还没有这个文件时搬过来
  *   - 玩法：solo（她自己玩，主人在旁边看）；duo（主人用自己的客户端进同一个服务器一起玩）是下一阶段，现在选不了
+ *   - 游戏模式：survival（生存）/ creative（创造：方块随便用、能飞，盖房子一层层长出来；要 RCON）
  *   - checkSetup()：服务器连不连得上、什么版本，这个版本的客户端装没装、Java 在不在，RCON 密码对不对，名字和端口对不对。
  *     面板逐项显示；有问题时「让大肥鱼玩」不能点，她自己调 game_start 时也先查一遍
  */
@@ -14,9 +15,12 @@ import { findJava, findMinecraftRoot } from './camera.js';
 import { rcon } from './rcon.js';
 
 export type McMode = 'solo' | 'duo';
+export type McGameMode = 'survival' | 'creative';
 
 export interface McSetup {
   mode: McMode;
+  /** 生存 / 创造（开局时用 RCON 切过去） */
+  gameMode: McGameMode;
   /** 双人：主人在游戏里的名字 */
   ownerName: string;
   host: string;
@@ -37,7 +41,7 @@ export interface McSetup {
 }
 
 /** 旧版插件设置（mc*） */
-export type LegacyMcSettings = Partial<Omit<McSetup, 'mode' | 'ownerName'>>;
+export type LegacyMcSettings = Partial<Omit<McSetup, 'mode' | 'ownerName' | 'gameMode'>>;
 
 export interface McCheckItem {
   ok: boolean;
@@ -59,7 +63,7 @@ const FILE = path.join(process.env.DSH_HOME ?? os.tmpdir(), 'dsh-game', 'minecra
 const NAME = /^[A-Za-z0-9_]{3,16}$/;
 
 const DEFAULTS: McSetup = {
-  mode: 'solo', ownerName: '', host: '127.0.0.1', port: 25565, username: 'DaFeiYu',
+  mode: 'solo', gameMode: 'survival', ownerName: '', host: '127.0.0.1', port: 25565, username: 'DaFeiYu',
   camera: true, cameraName: 'DaFeiYuCam', rconPort: 25575, rconPassword: '', clientDir: '', java: '', hudPort: 7391,
 };
 
@@ -69,6 +73,7 @@ function normalize(raw: Partial<McSetup>): McSetup {
   return {
     // 双人模式还没做：存下来的也按单人
     mode: 'solo',
+    gameMode: raw.gameMode === 'creative' ? 'creative' : 'survival',
     ownerName: str(raw.ownerName, DEFAULTS.ownerName),
     host: str(raw.host, DEFAULTS.host) || DEFAULTS.host,
     port: num(raw.port, DEFAULTS.port) || DEFAULTS.port,
@@ -81,6 +86,14 @@ function normalize(raw: Partial<McSetup>): McSetup {
     java: str(raw.java, DEFAULTS.java),
     hudPort: num(raw.hudPort, DEFAULTS.hudPort),
   };
+}
+
+async function rconCheck(setup: McSetup, why: string): Promise<McCheckItem> {
+  if (!setup.rconPassword) return { ok: false, label: '没填密码', problem: `${why}：填服务器 server.properties 里的 rcon.password（并开 enable-rcon=true）` };
+  const reply = await rcon({ host: setup.host, port: setup.rconPort, password: setup.rconPassword }, 'list', 3000).catch((err: Error) => err);
+  return reply instanceof Error
+    ? { ok: false, label: '连不上', problem: `RCON（${setup.host}:${setup.rconPort}）：${reply.message}` }
+    : { ok: true, label: '密码对' };
 }
 
 /** 读设置：有文件读文件，没有就从旧版插件设置搬过来 */
@@ -191,7 +204,9 @@ export async function checkSetup(setup: McSetup, hudInUse = false): Promise<McSe
 
   let client: McCheckItem = { ok: true, label: '不开摄像机' };
   let java: McCheckItem = { ok: true, label: '不开摄像机' };
-  let rconItem: McCheckItem = { ok: true, label: '不开摄像机' };
+  let rconItem: McCheckItem = setup.gameMode === 'creative'
+    ? await rconCheck(setup, '创造模式要用 RCON 切游戏模式、一层层放方块')
+    : { ok: true, label: '不开摄像机' };
   let hud: McCheckItem = { ok: true, label: '不开摄像机' };
   if (setup.camera) {
     const root = version ? findMinecraftRoot(setup.clientDir, version) : null;
@@ -204,14 +219,7 @@ export async function checkSetup(setup: McSetup, hudInUse = false): Promise<McSe
     java = javaPath !== 'javaw' && fs.existsSync(javaPath)
       ? { ok: true, label: javaPath }
       : { ok: false, label: '没找到', problem: '没找到 Java 21：HMCL 或官方启动器启动过一次这个版本就会带上；或者填 Java 的路径' };
-    if (!setup.rconPassword) {
-      rconItem = { ok: false, label: '没填密码', problem: '摄像机要用 RCON 切成旁观模式：填服务器 server.properties 里的 rcon.password（并开 enable-rcon=true）' };
-    } else {
-      const reply = await rcon({ host: setup.host, port: setup.rconPort, password: setup.rconPassword }, 'list', 3000).catch((err: Error) => err);
-      rconItem = reply instanceof Error
-        ? { ok: false, label: '连不上', problem: `RCON（${setup.host}:${setup.rconPort}）：${reply.message}` }
-        : { ok: true, label: '密码对' };
-    }
+    if (setup.gameMode !== 'creative') rconItem = await rconCheck(setup, '摄像机要用 RCON 切成旁观模式');
     hud = !setup.hudPort
       ? { ok: true, label: '不开 HUD 网页' }
       : hudInUse || (await portFree(setup.hudPort))

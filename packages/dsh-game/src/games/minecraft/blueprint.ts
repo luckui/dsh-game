@@ -31,7 +31,14 @@ export interface Blueprint {
   width: number;
   depth: number;
   height: number;
+  /** 形状图纸：图里西北角、最下面那格相对于她给的坐标在哪（形状的坐标可以是负的）；字符图没有（就是 0 0 0） */
+  offset?: { x: number; y: number; z: number };
 }
+
+/** 她给的坐标 → 图里西北角、最下面那格的世界坐标 */
+const base = (bp: Blueprint, origin: { x: number; y: number; z: number }) => ({
+  x: origin.x + (bp.offset?.x ?? 0), y: origin.y + (bp.offset?.y ?? 0), z: origin.z + (bp.offset?.z ?? 0),
+});
 
 export interface Placement {
   x: number;
@@ -165,7 +172,8 @@ function isTwoTallTop(bp: Blueprint, k: number, r: number, c: number): boolean {
 }
 
 /** 要放的方块（门只放下面那格）；origin 是第 1 层第一行第一个字符（西北角、最下面）的坐标 */
-export function placements(bp: Blueprint, origin: { x: number; y: number; z: number }): Placement[] {
+export function placements(bp: Blueprint, at0: { x: number; y: number; z: number }): Placement[] {
+  const origin = base(bp, at0);
   const out: Placement[] = [];
   for (let k = 0; k < bp.height; k++) {
     for (let r = 0; r < bp.depth; r++) {
@@ -181,7 +189,8 @@ export function placements(bp: Blueprint, origin: { x: number; y: number; z: num
 }
 
 /** 要清成空气的格子（图上的「.」） */
-export function clearCells(bp: Blueprint, origin: { x: number; y: number; z: number }): { x: number; y: number; z: number }[] {
+export function clearCells(bp: Blueprint, at0: { x: number; y: number; z: number }): { x: number; y: number; z: number }[] {
+  const origin = base(bp, at0);
   const out: { x: number; y: number; z: number }[] = [];
   for (let k = 0; k < bp.height; k++) {
     for (let r = 0; r < bp.depth; r++) {
@@ -196,8 +205,9 @@ export function clearCells(bp: Blueprint, origin: { x: number; y: number; z: num
 /**
  * 虚影要放的格子：方块多了（超过 limit）只放外壳（从外面看得到的：六个方向里有一边挨着空的），里面看不见的不放
  */
-export function ghostCells(bp: Blueprint, origin: { x: number; y: number; z: number }, limit = 600): Placement[] {
-  const all = placements(bp, origin);
+export function ghostCells(bp: Blueprint, at0: { x: number; y: number; z: number }, limit = 600): Placement[] {
+  const all = placements(bp, at0);
+  const origin = base(bp, at0);
   if (all.length <= limit) return all;
   return all.filter((p) => {
     const k = p.y - origin.y;
@@ -248,17 +258,50 @@ export function projections(bp: Blueprint): { front: string[]; side: string[]; t
   return { front, side, top };
 }
 
+/** 预览一张图最多这么宽、这么高（字符）：大的图纸缩小着画 */
+const PREVIEW_MAX = 64;
+
+/** 缩小：s×s 格并成一个字符（取其中第一个不是空气的） */
+function shrink(rows: string[], s: number): string[] {
+  if (s <= 1) return rows;
+  const out: string[] = [];
+  for (let r = 0; r < rows.length; r += s) {
+    let line = '';
+    for (let c = 0; c < (rows[0]?.length ?? 0); c += s) {
+      let ch = '.';
+      for (let dr = 0; dr < s && ch === '.'; dr++) for (let dc = 0; dc < s; dc++) {
+        const v = rows[r + dr]?.[c + dc];
+        if (v && v !== '.' && v !== ' ') { ch = v; break; }
+      }
+      line += ch;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+/** 第 k 层（从 1 数）的切片：从上往下看这一层，上面是北；大的缩小着画 */
+export function layerSlice(bp: Blueprint, k: number): string {
+  const rows = (bp.layers[k - 1] ?? []).map((r) => r.replace(/ /g, '.'));
+  const s = Math.ceil(Math.max(bp.width, bp.depth) / PREVIEW_MAX);
+  return `第 ${k} 层（共 ${bp.height} 层${bp.offset ? `，y = ${bp.offset.y + k - 1}` : ''}）${s > 1 ? `，缩小显示：一个字符 = ${s}×${s} 格` : ''}：\n${shrink(rows, s).join('\n')}`;
+}
+
 /** 交给她看的预览：尺寸、材料、三张投影、问题 */
 export function describeBlueprint(name: string, bp: Blueprint, warnings: string[], unknownNames: string[]): string {
   const mats = materials(bp);
   const total = Object.values(mats).reduce((a, b) => a + b, 0);
-  const { front, side, top } = projections(bp);
+  const s = Math.ceil(Math.max(bp.width, bp.depth, bp.height) / PREVIEW_MAX);
+  const shown = projections(bp);
+  const [front, side, top] = [shown.front, shown.side, shown.top].map((rows) => shrink(rows, s));
+  const scale = s > 1 ? `（太大了，缩小显示：一个字符 = ${s}×${s} 格）` : '';
+  const anchor = bp.offset ? `形状坐标的 x ${bp.offset.x}～${bp.offset.x + bp.width - 1}、y ${bp.offset.y}～${bp.offset.y + bp.height - 1}、z ${bp.offset.z}～${bp.offset.z + bp.depth - 1}；build 时给的坐标就是形状里的 0 0 0。` : '';
   const legend = Object.entries(bp.legend).map(([ch, s]) => `${ch}=${s.name}${Object.entries(s.props).map(([k, v]) => ` ${k}=${v}`).join('')}`).join('，');
   return [
-    `图纸「${name}」：宽 ${bp.width}（东西）× 深 ${bp.depth}（南北）× 高 ${bp.height}，共 ${total} 块。`,
+    `图纸「${name}」：宽 ${bp.width}（东西）× 深 ${bp.depth}（南北）× 高 ${bp.height}，共 ${total} 块。${anchor}`,
     `图例：${legend}`,
     `材料：${Object.entries(mats).map(([n, c]) => `${n} ×${c}`).join('，')}`,
-    `正面（从南往北看，上面是高处）：\n${front.join('\n')}`,
+    `正面（从南往北看，上面是高处）${scale}：\n${front.join('\n')}`,
     `侧面（从东往西看，左边是南）：\n${side.join('\n')}`,
     `俯视（从上往下看，上面是北）：\n${top.join('\n')}`,
     ...(unknownNames.length ? [`方块名不对：${unknownNames.join('；')}。改好图例再画一遍才能盖。`] : []),

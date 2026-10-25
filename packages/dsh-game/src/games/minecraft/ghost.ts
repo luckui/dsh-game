@@ -60,7 +60,7 @@ export class GhostBuild {
       for (const p of spots) {
         commands.push(`summon block_display ${p.x + 0.5} ${p.y + 0.5} ${p.z + 0.5} {block_state:{Name:"minecraft:${glass}"},`
           + `transformation:{left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f],translation:[-0.48f,-0.48f,-0.48f],scale:[0.96f,0.96f,0.96f]},`
-          + `brightness:{sky:15,block:15},Glowing:1b,glow_color_override:${GLOW[glass]},Tags:["dsh_ghost","dsh_ghost_${this.id}","${tagOf(this.id, p)}"]}`);
+          + `brightness:{sky:15,block:15},Glowing:1b,glow_color_override:${GLOW[glass]},Tags:["dsh_ghost","dsh_ghost_${this.id}","dsh_ghost_${this.id}_y${p.y}","${tagOf(this.id, p)}"]}`);
       }
     }
     // 一次几百条：分批发，每批一个连接
@@ -82,6 +82,12 @@ export class GhostBuild {
     if (!commands.length) return this.flushing;
     this.flushing = this.flushing.then(() => rconBatch(this.target, commands, 10_000)).catch(() => {});
     return this.flushing;
+  }
+
+  /** 这一层整层放好了（创造模式一层层放）：这一层的虚影都去掉 */
+  removeLayer(y: number): void {
+    this.pending.push(`kill @e[type=block_display,tag=dsh_ghost_${this.id}_y${y}]`);
+    this.timer ??= setTimeout(() => this.flush(), 100);
   }
 
   /** 这次盖完（成没成都一样）：剩下的虚影都去掉 */
