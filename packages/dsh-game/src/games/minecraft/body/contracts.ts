@@ -34,6 +34,8 @@ export type MinecraftActionName =
   | 'harvest_crops'
   | 'breed_animals'
   | 'shear_sheep'
+  | 'use_bucket'
+  | 'use_on_block'
   | 'place_block'
   | 'break_block'
   | 'execute_blueprint'

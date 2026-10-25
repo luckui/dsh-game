@@ -18,7 +18,7 @@ import { rcon, rconBatch, type RconTarget } from './rcon.js';
 import { CameraClient, findJava, findMinecraftRoot } from './camera.js';
 import { TEMPLATES, clearCells, describeBlueprint, ghostCells, materials, parseBlueprint, placements, type Blueprint } from './blueprint.js';
 import { GhostBuild } from './ghost.js';
-import { WorldJournal } from './journal.js';
+import { WorldJournal, dimensionName } from './journal.js';
 
 export interface MinecraftOptions {
   /** 打包好的身体子进程（lib/minecraft-worker.cjs） */
@@ -92,13 +92,15 @@ const ACTIONS: GameActionSpec[] = [
   { action: 'harvest', description: '收附近 16 格内熟了的庄稼，捡起来，再补种回去（后台做）；没熟的会告诉你长到第几阶段了', params: { name: '只收哪种：wheat、carrots、potatoes、beetroots（不填就都收）' } },
   { action: 'breed', description: '拿饲料喂附近的动物让它们生小的（后台做）：牛、羊吃 wheat，猪吃 carrot / potato / beetroot，鸡吃种子；喂过的动物 5 分钟后才能再生', params: { name: '动物的英文 id，比如 cow、sheep、pig、chicken', index: '喂几对（默认 1）' } },
   { action: 'shear', description: '用剪刀剪附近羊的羊毛（后台做）；剪过的羊吃了草才会长回来', params: { index: '剪几只（默认 3）' } },
+  { action: 'bucket', description: '用桶（后台做）：空桶（bucket）装起那一格的水或岩浆（要是源头，流动的装不起来）；水桶、岩浆桶倒在那一格（那一格要空着）。会告诉你倒完以后那里和旁边变成了什么', params: { name: 'bucket、water_bucket 或 lava_bucket', text: '坐标「x y z」' } },
+  { action: 'use', description: '拿着一样东西对一格方块用一下（后台做），比如打火石点火、骨粉催熟', params: { name: '手里拿的东西的英文 id，比如 flint_and_steel', text: '坐标「x y z」：对着这一格方块的上面用' } },
   { action: 'mark', description: '在这个世界的日志里记一个地点（家、矿洞、村庄……），下次来还能找到；同名的会换成新位置', params: { name: '地点的名字', text: '坐标「x y z」（不填就是你现在站的地方）；填「删掉」就把这个地点从日志里删了' } },
   { action: 'journal', description: '看这个世界的整本日志（目标、地点、盖过的房子、种过的地、床、死过的地方、图纸）' },
   { action: 'chat', description: '在游戏的聊天栏里打字（游戏里的玩家才看得到；你回复里写的话是说出口的，不会进游戏聊天）', params: { text: '要发的话' } },
   { action: 'stop', description: '停下正在做的事' },
 ];
 
-const LONG = new Set(['collect', 'craft', 'smelt', 'go', 'go_to_player', 'attack', 'pickup', 'hide', 'flee', 'sleep', 'build', 'farm', 'harvest', 'breed', 'shear']);
+const LONG = new Set(['collect', 'craft', 'smelt', 'go', 'go_to_player', 'attack', 'pickup', 'hide', 'flee', 'sleep', 'build', 'farm', 'harvest', 'breed', 'shear', 'bucket', 'use']);
 
 const ERROR_TEXT: Record<string, string> = {
   not_connected: '还没进游戏',
@@ -152,6 +154,7 @@ export class MinecraftSession implements GameSession {
   private designs = new Map<string, Blueprint>();
   private journal: WorldJournal | null = null;
   private lastJournalSave = 0;
+  private lastDeathAt = 0;
   /** 盖房子的虚影：动作的说法（「盖「小木屋」」）→ 虚影 */
   private ghosts = new Map<string, GhostBuild>();
   private ghostSeq = 0;
@@ -193,6 +196,7 @@ export class MinecraftSession implements GameSession {
       '【目标】长期想做的事用 goal 写下来，每个时刻都会提醒你，换多少轮都不会忘。',
       '【盖房子】房子是你自己设计的：用 design 交一张图纸（图例 + 从下往上一层层的字符图），会给你看正面、侧面、俯视三张投影、材料清单和图上的问题，你看着改；满意了用 build 在一个坐标盖起来，身体照图纸一块块放。template 有几张常见建筑的参考图纸，可以照着改。',
       '【种地】锄头锄过的泥土是耕地，种子种上去过几分钟（游戏时间）一阶一阶长大；耕地离水 4 格以内长得快。熟了用 harvest 收，种子会补种回去。动物用对的饲料喂一对就会生一只小的；栅栏、羊圈可以用 design 画了 build。',
+      '【下界】用 10 块黑曜石搭一个门框（参考图纸 nether_portal），拿打火石（flint_and_steel：1 铁锭 + 1 燧石）点门框里面最底下那块的上面，门框里会亮起紫色的传送门；走进去站一会儿就到了下界，从下界的门走回来就回到主世界。黑曜石要钻石镐才挖得动；岩浆源头碰到水会变成黑曜石，流动的岩浆碰到水变成圆石。下界到处是岩浆；床在那里一睡就会爆炸；水倒出来会马上蒸发；猪灵会打没穿金盔甲的人。',
       '【日志】每个世界有一本日志：你的目标、存好的图纸、用 mark 记的地点，还有盖过的房子、种过的地、床、死在哪，下次来这个世界还在。',
       '【说话】你回复里写的话是说出口的（主人和观众听得到）；游戏里的玩家要用 chat 才看得到。',
       formatActionList(),
@@ -255,8 +259,8 @@ export class MinecraftSession implements GameSession {
   refuse(action: GameAction): string | null {
     if (!ACTIONS.some((a) => a.action === action.action)) return `没有这个动作：${action.action}。\n${formatActionList()}`;
     if (!this.runtime || !this.status?.connected) return '还没进游戏（先 game_start）。';
-    if (['collect', 'craft', 'smelt', 'go_to_player', 'follow', 'attack', 'find', 'equip', 'drop', 'place', 'farm', 'breed', 'mark'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
-    if (['go', 'place', 'build', 'farm'].includes(action.action) && !parseXyz(action.text)) return `${action.action} 要在 text 里填坐标「x y z」。`;
+    if (['collect', 'craft', 'smelt', 'go_to_player', 'follow', 'attack', 'find', 'equip', 'drop', 'place', 'farm', 'breed', 'mark', 'bucket', 'use'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
+    if (['go', 'place', 'build', 'farm', 'bucket', 'use'].includes(action.action) && !parseXyz(action.text)) return `${action.action} 要在 text 里填坐标「x y z」。`;
     if (['template', 'design', 'build'].includes(action.action) && !action.name?.trim()) return `${action.action} 要填 name。`;
     if (action.action === 'design' && !action.text?.trim()) return 'design 要在 text 里放图纸。';
     if (action.action === 'template' && !TEMPLATES[action.name!.trim()]) return `没有这张参考图纸：${action.name}。有：${Object.keys(TEMPLATES).join('、')}`;
@@ -395,6 +399,8 @@ export class MinecraftSession implements GameSession {
         }
         case 'harvest': return ['harvest_crops', { crop: name || undefined, radius: 16, replant: true }, `收${name ? ` ${name}` : '庄稼'}`];
         case 'breed': return ['breed_animals', { animal: name, pairs: Math.min(4, count) }, `喂 ${name} 繁殖`];
+        case 'bucket': return ['use_bucket', { item: name, position: xyz }, name === 'bucket' ? `用桶装 ${fmtXyz(xyz!)} 的东西` : `把 ${name} 倒在 ${fmtXyz(xyz!)}`];
+        case 'use': return ['use_on_block', { item: name, position: xyz, face: 'top' }, `对 ${fmtXyz(xyz!)} 用 ${name}`];
         case 'shear': return ['shear_sheep', { count: Math.min(16, action.index ? count : 3) }, '剪羊毛'];
         default: return ['pickup_drops', { radius: 12 }, '捡附近的掉落物'];
       }
@@ -519,6 +525,7 @@ export class MinecraftSession implements GameSession {
         if (this.running) this.ghosts.get(this.running.label)?.remove(event);
         break;
       case 'death':
+        this.lastDeathAt = Date.now();
         // 正在做的事由身体自己报（死的时候它会停掉并回报），这里不清，免得两边对不上
         this.queue = [];
         if (event.position) this.journal?.addDeath({ x: Math.floor(event.position.x), y: Math.floor(event.position.y), z: Math.floor(event.position.z), dimension: this.dimension() });
@@ -572,6 +579,7 @@ export class MinecraftSession implements GameSession {
     if (Date.now() - this.lastJournalSave > 60_000) this.saveLast();
     const dimension = String(s?.world?.dimension ?? '');
     const moved = this.lastDimension !== null && dimension !== this.lastDimension;
+    if (moved) this.crossedDimension(this.lastDimension!, dimension, s?.body?.position);
     this.lastDimension = dimension;
     if (moved || Date.now() - this.lastRespectate >= RESPECTATE_MS) void this.attachSpectators();
     // 她一下子跑远了（死了在出生点复活、被传送）或者换了维度：服务器那边旁观会跟过去，摄像机客户端的画面却会停在原地，重新挂一次
@@ -780,6 +788,20 @@ export class MinecraftSession implements GameSession {
       const p = this.snapshot?.body?.position;
       if (r.outcome === 'succeeded' && p) j.setBed({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), dimension });
     }
+  }
+
+  /** 换了维度：告诉她到了哪；走传送门过去的，两头的门记进日志 */
+  private crossedDimension(from: string, to: string, here: { x: number; y: number; z: number } | undefined): void {
+    const name = (d: string) => dimensionName(d.replace('minecraft:', ''));
+    const before = this.lastBodyPos;
+    // 死了在主世界复活也会换维度：那不是走传送门
+    const respawned = Date.now() - this.lastDeathAt < 30_000;
+    const spot = (p: { x: number; y: number; z: number }, d: string) => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z), dimension: d.replace('minecraft:', '') });
+    if (!respawned && before && here) this.journal?.addPortal(spot(before, from), spot(here, to));
+    const where = here ? fmtXyz({ x: Math.floor(here.x), y: Math.floor(here.y), z: Math.floor(here.z) }) : '位置不明';
+    this.push(respawned
+      ? `在${name(to)}复活了（${where}）。`
+      : `穿过传送门，到了${name(to)}（${where}），从${name(from)}过来的。你站在这边的传送门里；走出来再走回门里，就回到${name(from)}。`, true);
   }
 
   /** 玩到哪了：结束时、玩的过程中每分钟一次 */

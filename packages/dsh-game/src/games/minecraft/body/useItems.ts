@@ -1,0 +1,152 @@
+/**
+ * 手里拿着东西对着世界用一下（右键）：她决定用什么、对着哪一格；身体走过去、换到手上、瞄准、用，再看那一格和旁边变成了什么。
+ *
+ *   useBucket   空桶：装起那一格的水或岩浆（要是源头，流动的装不起来）
+ *               水桶 / 岩浆桶：倒在那一格（那一格要是空的，旁边或下面要有能贴着的方块）
+ *   useOnBlock  对那一格方块的某一面用手里的东西：打火石点火（传送门门框里面点着就亮了）、骨粉……
+ *
+ * 结果里说清楚世界实际变成了什么：倒的水碰到岩浆源变成黑曜石、碰到流动岩浆变成圆石，下界里水倒出来就蒸发，传送门亮没亮。
+ */
+import { goals } from 'mineflayer-pathfinder';
+import { Vec3 } from 'vec3';
+import type { MinecraftActionErrorCode, MinecraftActionResult } from './contracts.js';
+import { patchedGoto } from './patchedGoto.js';
+
+const BUCKETS = new Set(['bucket', 'water_bucket', 'lava_bucket']);
+const LIQUID_OF: Record<string, string> = { water_bucket: 'water', lava_bucket: 'lava' };
+const SIDES: Record<string, Vec3> = {
+  top: new Vec3(0, 1, 0), bottom: new Vec3(0, -1, 0),
+  north: new Vec3(0, 0, -1), south: new Vec3(0, 0, 1), west: new Vec3(-1, 0, 0), east: new Vec3(1, 0, 0),
+};
+
+function counts(bot: any): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const i of bot.inventory?.items?.() ?? []) out[i.name] = (out[i.name] ?? 0) + i.count;
+  return out;
+}
+
+function difference(before: Record<string, number>, after: Record<string, number>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const d = (after[k] ?? 0) - (before[k] ?? 0);
+    if (d) out[k] = d;
+  }
+  return out;
+}
+
+function result(started: number, before: Record<string, number>, bot: any, outcome: MinecraftActionResult['outcome'], summary: string, code?: MinecraftActionErrorCode): MinecraftActionResult {
+  return {
+    actionId: '', outcome, summary, durationMs: Date.now() - started,
+    inventoryDelta: difference(before, counts(bot)), worldChanges: [], observations: [],
+    ...(code ? { error: { code, recoverable: true, details: { message: summary } } } : {}),
+  };
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const fmt = (p: Vec3) => `${p.x} ${p.y} ${p.z}`;
+const item = (bot: any, name: string) => (bot.inventory?.items?.() ?? []).find((i: any) => i.name === name);
+const isSource = (b: any) => !!b && (b.name === 'water' || b.name === 'lava') && Number(b.getProperties?.().level ?? b.metadata ?? 0) === 0;
+const solid = (b: any) => !!b && b.boundingBox === 'block';
+const inNether = (bot: any) => String(bot.game?.dimension ?? '').includes('nether');
+
+/** 走到够得着的地方（4 格内，看得到那一格） */
+async function reach(bot: any, target: Vec3, signal: AbortSignal): Promise<void> {
+  if (bot.entity.position.offset(0, 1.6, 0).distanceTo(target.offset(0.5, 0.5, 0.5)) <= 4) return;
+  const r = await patchedGoto(bot, new goals.GoalNear(target.x, target.y, target.z, 3), { signal });
+  if (!r.ok) throw new Error(`cannot get close enough: ${r.message}`);
+}
+
+/** 这一格和周围一圈（3×3×3，含斜角）现在是什么（看用完以后变了什么：倒下去的水会流到斜下方） */
+function around(bot: any, p: Vec3): Map<string, string> {
+  const out = new Map<string, string>();
+  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+    const q = p.offset(dx, dy, dz);
+    out.set(fmt(q), bot.blockAt(q)?.name ?? 'unknown');
+  }
+  return out;
+}
+
+function changes(before: Map<string, string>, after: Map<string, string>): string[] {
+  const out: string[] = [];
+  for (const [k, was] of before) {
+    const now = after.get(k);
+    if (now && now !== was) out.push(`${k}: ${was} → ${now}`);
+  }
+  return out;
+}
+
+export async function useBucket(bot: any, req: { item: string; position: { x: number; y: number; z: number }; signal: AbortSignal }): Promise<MinecraftActionResult> {
+  const started = Date.now();
+  const before = counts(bot);
+  const target = new Vec3(Math.floor(req.position.x), Math.floor(req.position.y), Math.floor(req.position.z));
+  if (!BUCKETS.has(req.item)) return result(started, before, bot, 'failed', `${req.item} is not a bucket; buckets: bucket (empty), water_bucket, lava_bucket`, 'unknown_item');
+  const held = item(bot, req.item);
+  if (!held) return result(started, before, bot, 'failed', `no ${req.item} in the inventory${req.item === 'bucket' ? ' (a bucket is 3 iron ingots)' : ''}`, 'missing_item');
+  const block = bot.blockAt(target);
+  if (!block) return result(started, before, bot, 'failed', `${fmt(target)} is not loaded`, 'target_not_found');
+
+  try {
+    await reach(bot, target, req.signal);
+    await bot.equip(held, 'hand');
+    const was = around(bot, target);
+    if (req.item === 'bucket') {
+      // 装：对着液体源头那一格的中间用
+      if (block.name !== 'water' && block.name !== 'lava') return result(started, before, bot, 'failed', `${fmt(target)} is ${block.name}, not water or lava`, 'target_not_found');
+      if (!isSource(block)) return result(started, before, bot, 'failed', `the ${block.name} at ${fmt(target)} is flowing, not a source block; only a source can be picked up`, 'blocked');
+      await bot.lookAt(target.offset(0.5, 0.5, 0.5), true);
+      await sleep(100);
+      bot.activateItem();
+      await sleep(500);
+      const got = counts(bot)[`${block.name}_bucket`] ?? 0;
+      if (got > (before[`${block.name}_bucket`] ?? 0)) return result(started, before, bot, 'succeeded', `filled the bucket with ${block.name} from ${fmt(target)}`);
+      return result(started, before, bot, 'failed', `the bucket stayed empty (could not aim at the ${block.name} at ${fmt(target)})`, 'blocked');
+    }
+    // 倒：那一格要空着；对着它旁边一个实心方块朝它的那一面用
+    if (solid(block)) return result(started, before, bot, 'failed', `${fmt(target)} is ${block.name}; pour into an empty cell`, 'blocked');
+    const liquid = LIQUID_OF[req.item];
+    const face = Object.entries(SIDES).map(([, d]) => ({ against: target.minus(d), d })).find((f) => solid(bot.blockAt(f.against)));
+    if (!face) return result(started, before, bot, 'failed', `nothing solid next to ${fmt(target)} to pour against`, 'blocked');
+    await bot.lookAt(face.against.offset(0.5 + face.d.x * 0.5, 0.5 + face.d.y * 0.5, 0.5 + face.d.z * 0.5), true);
+    await sleep(100);
+    bot.activateItem();
+    await sleep(1500);
+    const now = around(bot, target);
+    const changed = changes(was, now);
+    const emptied = (counts(bot)[req.item] ?? 0) < (before[req.item] ?? 0);
+    const formed = changed.filter((c) => /→ (obsidian|cobblestone|stone)$/.test(c));
+    if (!emptied) return result(started, before, bot, 'failed', `could not pour the ${liquid} at ${fmt(target)}`, 'blocked');
+    if (liquid === 'water' && inNether(bot) && bot.blockAt(target)?.name !== 'water') {
+      return result(started, before, bot, 'succeeded', `poured the water out at ${fmt(target)}, and it evaporated at once (water cannot exist in the Nether)`);
+    }
+    const notes = formed.length ? `; ${formed.map((c) => c.replace(/: (lava|water) → /, ': $1 turned into ')).join('; ')}` : '';
+    return result(started, before, bot, 'succeeded', `poured ${liquid} at ${fmt(target)}${notes}`);
+  } catch (err) {
+    return result(started, before, bot, req.signal.aborted ? 'cancelled' : 'failed', (err as Error).message, 'path_unreachable');
+  }
+}
+
+export async function useOnBlock(bot: any, req: { item: string; position: { x: number; y: number; z: number }; face?: string; signal: AbortSignal }): Promise<MinecraftActionResult> {
+  const started = Date.now();
+  const before = counts(bot);
+  const target = new Vec3(Math.floor(req.position.x), Math.floor(req.position.y), Math.floor(req.position.z));
+  const held = item(bot, req.item);
+  if (!held) return result(started, before, bot, 'failed', `no ${req.item} in the inventory`, 'missing_item');
+  const block = bot.blockAt(target);
+  if (!block || !solid(block)) return result(started, before, bot, 'failed', `${fmt(target)} is ${block?.name ?? 'not loaded'}; use it on a solid block`, 'target_not_found');
+  const dir = SIDES[req.face ?? 'top'] ?? SIDES.top;
+  try {
+    await reach(bot, target, req.signal);
+    await bot.equip(held, 'hand');
+    const was = around(bot, target.plus(dir));
+    await bot.lookAt(target.offset(0.5 + dir.x * 0.5, 0.5 + dir.y * 0.5, 0.5 + dir.z * 0.5), true);
+    await bot.activateBlock(bot.blockAt(target), dir);
+    await sleep(800);
+    const changed = changes(was, around(bot, target.plus(dir)));
+    const portal = bot.findBlock?.({ matching: (b: any) => b.name === 'nether_portal', maxDistance: 6 });
+    if (portal) return result(started, before, bot, 'succeeded', `used ${req.item} on ${block.name} at ${fmt(target)}; the nether portal lit up (purple portal blocks around ${fmt(portal.position)}; walk into them to travel)`);
+    if (!changed.length) return result(started, before, bot, 'partial', `used ${req.item} on ${block.name} at ${fmt(target)}, but nothing changed`);
+    return result(started, before, bot, 'succeeded', `used ${req.item} on ${block.name} at ${fmt(target)}: ${changed.join('; ')}`);
+  } catch (err) {
+    return result(started, before, bot, req.signal.aborted ? 'cancelled' : 'failed', (err as Error).message, 'path_unreachable');
+  }
+}

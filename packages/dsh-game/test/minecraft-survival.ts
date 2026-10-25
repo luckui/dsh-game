@@ -15,7 +15,7 @@ import { MinecraftSession } from '../src/games/minecraft/session.js';
 import { rcon as rconRaw, type RconTarget } from '../src/games/minecraft/rcon.js';
 
 const ROOT = path.resolve(process.argv[2] ?? '.');
-/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量）、build（盖房子）、farm（种地、养动物）、journal（世界日志）、不填 = 全部 */
+/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量）、build（盖房子）、farm（种地、养动物）、journal（世界日志）、nether（桶、黑曜石、下界传送门）、不填 = 全部 */
 const SUITE = process.argv[3] ?? 'all';
 const props = Object.fromEntries(
   fs.readFileSync(path.join(ROOT, '.mc-server', 'server.properties'), 'utf8').split(/\r?\n/)
@@ -474,7 +474,10 @@ async function farmCases(): Promise<void> {
   await rcon(`fill ${X - 8} ${Y + 1} ${Z - 8} ${X - 5} ${Y + 1} ${Z - 5} wheat[age=7] replace wheat`);
   await sleep(500);
   await step('harvest', { name: 'wheat' }, { ok: /：做完了/, atLeast: { wheat: 16 } });
-  check((await countBlocks(field, 'wheat[age=0]')) === 16, `16 格都补种回去了（${await countBlocks(field, 'wheat[age=0]')} 格）`);
+  // 补种的是刚种下的（有水，几秒内可能已经长了一阶）：16 格都有小麦、没有一格是熟的
+  const replanted = await countBlocks(field, 'wheat');
+  const stillRipe = await countBlocks(field, 'wheat[age=7]');
+  check(replanted === 16 && stillRipe === 0, `16 格都补种回去了（有小麦 ${replanted} 格，熟的 ${stillRipe} 格）`);
 
   begin('繁殖：没饲料');
   await rcon(`summon cow ${X + 2} ${Y + 1} ${Z - 2}`);
@@ -578,6 +581,117 @@ async function journalCases(): Promise<void> {
   check(fs.readdirSync(JOURNAL_DIR).some((f) => f.includes('.cleared-')), '清空的改名留着');
 }
 
+/** 等她看到某一行（换维度这类不是她动作结果的事） */
+async function waitLine(match: RegExp, ms: number): Promise<string | null> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const hit = lines.find((l) => match.test(l));
+    if (hit) {
+      lines.splice(lines.indexOf(hit), 1);
+      return hit;
+    }
+    const m = await session.wait(AbortSignal.timeout(Math.min(10_000, end - Date.now())), 10_000);
+    lines.push(...m.lines);
+  }
+  return null;
+}
+
+async function dimensionNow(): Promise<string> {
+  return String((await body().command<any>('snapshot', {}, 10_000))?.world?.dimension ?? '');
+}
+
+/** 桶、浇黑曜石、挖黑曜石、搭门框、点火、去下界再回来 */
+async function netherCases(): Promise<void> {
+  await rcon(`fill ${X - 9} ${Y + 1} ${Z - 9} ${X + 9} ${Y + 6} ${Z + 9} air`);
+  await rcon(`fill ${X - 9} ${Y} ${Z - 9} ${X + 9} ${Y} ${Z + 9} dirt`);
+  await rcon(`kill @e[type=!player,x=${X},y=${Y},z=${Z},distance=..40]`);
+  await reset();
+  await rcon(`tp ${NAME} ${X} ${Y + 1} ${Z}`);
+  await sleep(1500);
+  const is = async (x: number, y: number, z: number, block: string) => /passed/i.test(await rcon(`execute if block ${x} ${y} ${z} ${block}`));
+
+  begin('桶：装水');
+  await rcon(`setblock ${X + 4} ${Y} ${Z + 4} water`);
+  await rcon(`give ${NAME} bucket 1`);
+  await sleep(1000);
+  await step('bucket', { name: 'bucket', text: `${X + 4} ${Y} ${Z + 4}` }, { ok: /：做完了/, gain: { bucket: -1, water_bucket: 1 } });
+  check(await is(X + 4, Y, Z + 4, 'air'), '水被装走了，那一格空了');
+
+  begin('桶：往岩浆源旁边倒水，浇出黑曜石，再把水装回来');
+  await rcon(`setblock ${X + 4} ${Y} ${Z + 4} lava`);
+  await sleep(500);
+  const poured = await step('bucket', { name: 'water_bucket', text: `${X + 5} ${Y + 1} ${Z + 4}` }, { ok: /：做完了/, gain: { water_bucket: -1, bucket: 1 } });
+  check(await is(X + 4, Y, Z + 4, 'obsidian'), '岩浆源变成了黑曜石');
+  check(/obsidian/.test(poured), `告诉她变成了黑曜石（${poured.slice(0, 160)}）`);
+  await step('bucket', { name: 'bucket', text: `${X + 5} ${Y + 1} ${Z + 4}` }, { ok: /：做完了/, gain: { water_bucket: 1 } });
+  await rcon(`give ${NAME} bucket 1`);
+  await sleep(800);
+  const empty = await act('bucket', { name: 'bucket', text: `${X + 6} ${Y + 1} ${Z + 4}` });
+  check(/没成/.test(empty) && /not water or lava/.test(empty), `空的格子装不起来，说了那里不是水（${empty.slice(0, 120)}）`);
+
+  begin('挖黑曜石（钻石镐）');
+  await rcon(`give ${NAME} diamond_pickaxe 1`);
+  await sleep(800);
+  await step('collect', { name: 'obsidian', index: 1 }, { ok: /做完了/, gain: { obsidian: 1 }, timeoutMs: 120_000 });
+
+  begin('搭门框（参考图纸，10 块黑曜石）、打火石点火');
+  await rcon(`give ${NAME} obsidian 9`);
+  await rcon(`give ${NAME} flint_and_steel 1`);
+  await rcon(`give ${NAME} cobblestone 16`);
+  await sleep(1000);
+  const tpl = await session.act({ action: 'template', name: 'nether_portal' });
+  check(/共 10 块/.test(tpl) && /存好了/.test(tpl), '参考图纸：10 块黑曜石');
+  const o = { x: X - 5, y: Y + 1, z: Z - 6 };
+  await step('build', { name: 'nether_portal', text: `${o.x} ${o.y} ${o.z}` }, { ok: /：做完了/, gain: { obsidian: -10 }, timeoutMs: 300_000 });
+  const lit = await step('use', { name: 'flint_and_steel', text: `${o.x + 1} ${o.y} ${o.z}` }, { ok: /：做完了/ });
+  check(/lit up/.test(lit), `说了传送门亮了（${lit.slice(0, 160)}）`);
+  check(await is(o.x + 1, o.y + 1, o.z, 'nether_portal') && await is(o.x + 2, o.y + 3, o.z, 'nether_portal'), '门框里是传送门');
+
+  begin('走进传送门，到下界');
+  await rcon(`give ${NAME} white_bed 1`);
+  await sleep(800);
+  const into = await act('go', { text: `${o.x + 1} ${o.y + 1} ${o.z}` }, 60_000);
+  const arrived = await waitLine(/穿过传送门，到了下界/, 30_000);
+  note(arrived ?? '（没等到）');
+  check(!!arrived, `她知道到了下界（go：${into.slice(0, 100)}）`);
+  check(/nether/.test(await dimensionNow()), '身体在下界');
+
+  begin('在下界：床不能睡、水倒出来就蒸发');
+  const bed = await act('sleep', {});
+  check(/没成/.test(bed) && /explode/.test(bed), `不放床，说了会爆炸（${bed.slice(0, 140)}）`);
+  const here = (await body().command<any>('snapshot', {}, 10_000))?.body?.position;
+  const p = { x: Math.floor(here.x), y: Math.floor(here.y), z: Math.floor(here.z) };
+  note(`她在下界 ${p.x} ${p.y} ${p.z}`);
+  // 门是东西向的：往南或往北一两格是门外（新生成的门两边有黑曜石平台）
+  let outside: { x: number; y: number; z: number } | null = null;
+  for (const dz of [1, -1, 2, -2]) {
+    const q = { x: p.x, y: p.y, z: p.z + dz };
+    const free = /passed/i.test(await rcon(`execute in minecraft:the_nether if block ${q.x} ${q.y} ${q.z} air`));
+    const floor = /failed|未通过/i.test(await rcon(`execute in minecraft:the_nether if block ${q.x} ${q.y - 1} ${q.z} #minecraft:air`)) && !/passed/i.test(await rcon(`execute in minecraft:the_nether if block ${q.x} ${q.y - 1} ${q.z} lava`));
+    if (free && floor) { outside = q; break; }
+  }
+  check(!!outside, `门外有地方站（${outside ? `${outside.x} ${outside.y} ${outside.z}` : '没有'}）`);
+  if (outside) {
+    const water = await act('bucket', { name: 'water_bucket', text: `${outside.x} ${outside.y} ${outside.z}` });
+    check(/evaporated/.test(water), `下界里水倒出来就蒸发（${water.slice(0, 140)}）`);
+
+    begin('从下界的门走回来（人还站在门里：身体先退一步再进）');
+    await act('go', { text: `${p.x} ${p.y} ${p.z}` }, 60_000);
+    const back = await waitLine(/穿过传送门，到了主世界/, 30_000);
+    note(back ?? '（没等到）');
+    check(!!back && /overworld/.test(await dimensionNow()), '回到了主世界');
+    const book = await session.act({ action: 'journal' });
+    note(book.replace(/\n/g, ' | ').slice(0, 500));
+    check(/传送门：主世界 \(\d+, \d+, \d+\) ↔ 下界/.test(book), '传送门两头记进了日志');
+  }
+  // 拆掉门框，免得后面的测试走进去
+  await rcon(`fill ${o.x} ${o.y} ${o.z} ${o.x + 3} ${o.y + 4} ${o.z} air`);
+  if (!/overworld/.test(await dimensionNow())) {
+    await rcon(`execute in minecraft:overworld run tp ${NAME} ${X} ${Y + 1} ${Z}`);
+    await sleep(3000);
+  }
+}
+
 async function reset(): Promise<void> {
   await rcon(`clear ${NAME}`);
   await rcon(`effect clear ${NAME}`);
@@ -614,6 +728,7 @@ async function main(): Promise<void> {
     if (SUITE === 'all' || SUITE === 'build') await buildCases();
     if (SUITE === 'all' || SUITE === 'farm') await farmCases();
     if (SUITE === 'all' || SUITE === 'journal') await journalCases();
+    if (SUITE === 'all' || SUITE === 'nether') await netherCases();
   } finally {
     await session.stop().catch(() => {});
     await rcon(`forceload remove ${X - 16} ${Z - 16} ${X + 16} ${Z + 16}`);

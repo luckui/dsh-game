@@ -140,6 +140,10 @@ export async function fleeFromHostiles(bot: any, signal: AbortSignal, distance =
 /** 睡觉：附近有床就去睡，没有就放下背包里的床；睡到天亮 */
 export async function sleepInBed(bot: any, signal: AbortSignal): Promise<MinecraftActionResult> {
   const started = Date.now();
+  const dimension = String(bot.game?.dimension ?? '');
+  if (/nether|end/.test(dimension)) {
+    return failed(started, 'unsafe', `did not put a bed down: in the ${dimension.includes('nether') ? 'Nether' : 'End'} a bed explodes when you try to sleep in it`);
+  }
   let bed = bot.findBlock?.({ matching: (b: any) => bot.isABed?.(b), maxDistance: 24 });
   let placed: string | null = null;
   if (!bed) {

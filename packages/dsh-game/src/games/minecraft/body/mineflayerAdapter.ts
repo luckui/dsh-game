@@ -18,6 +18,7 @@ import { gatherWood } from './gatherWood.js';
 import { fleeFromHostiles, hideUnderground, sleepInBed, swimToShore } from './survival.js';
 import { buildStructure } from './build.js';
 import { breedAnimals, farmPlot, harvestCrops, shearSheep } from './farming.js';
+import { useBucket, useOnBlock } from './useItems.js';
 import { placeBlockAt as airiPlaceBlockAt, breakBlockAt, isInteractive, isReplaceableForPlacement, type PlaceFace } from './placeBlock.js';
 import { Vec3 } from 'vec3';
 import { runAdaptiveCollection } from './collectionStrategy.js';
@@ -471,6 +472,7 @@ export function createMineflayerAdapter(
       ...(version ? { version } : {}),
     });
     bot = current;
+    current.once('login', () => fixPickaxeSpeeds(current.registry));
     stopFollowSession();
     lastBreathablePosition = undefined;
     oxygenEmergencyActive = false;
@@ -2414,6 +2416,31 @@ export function createMineflayerAdapter(
 
     async navigateToPosition(position, options) {
       const current = requireBot(bot);
+      // 走进传送门：要踩进那一格，站着等它传过去（生存模式站 4 秒）；到了另一边就算走到了
+      const portal = current.blockAt(new Vec3(Math.floor(position.x), Math.floor(position.y), Math.floor(position.z)));
+      if (portal && /_portal$/.test(portal.name)) {
+        const from = String(current.game?.dimension ?? '');
+        // 已经站在门里（刚传过来）：原版要先离开传送门再进去才会传，先往旁边退一步
+        const feet = current.entity.position.floored();
+        if (/_portal$/.test(current.blockAt(feet)?.name ?? '')) {
+          const out = [[0, 1], [0, -1], [1, 0], [-1, 0], [0, 2], [0, -2], [2, 0], [-2, 0]]
+            .map(([dx, dz]) => feet.offset(dx, 0, dz))
+            .find((p) => {
+              const at = current.blockAt(p);
+              const head = current.blockAt(p.offset(0, 1, 0));
+              const ground = current.blockAt(p.offset(0, -1, 0));
+              return at?.boundingBox === 'empty' && !/_portal$|lava|fire/.test(at.name) && head?.boundingBox === 'empty' && ground?.boundingBox === 'block';
+            });
+          if (out) {
+            await patchedGoto(current, new goals.GoalBlock(out.x, out.y, out.z), { signal: options.signal });
+            await delay(500, options.signal);
+          }
+        }
+        const r = await patchedGoto(current, new goals.GoalBlock(Math.floor(position.x), Math.floor(position.y), Math.floor(position.z)), { signal: options.signal });
+        for (let waited = 0; waited < 8000 && String(current.game?.dimension ?? '') === from; waited += 250) await delay(250, options.signal);
+        const crossed = String(current.game?.dimension ?? '') !== from;
+        return crossed ? { ...r, ok: true, reason: 'success', message: `went through the ${portal.name.replace('_', ' ')}` } : r.ok ? { ...r, ok: false, reason: 'error', message: 'stood in the portal but it did not take her anywhere' } : r;
+      }
       return patchedGoto(
         current,
         new goals.GoalNear(position.x, position.y, position.z, options.range),
@@ -2477,6 +2504,14 @@ export function createMineflayerAdapter(
     async shearSheep(options) {
       const current = requireBot(bot);
       return shearSheep(current, options, farmHelpers(current, options.signal));
+    },
+
+    async useBucket(options) {
+      return useBucket(requireBot(bot), options);
+    },
+
+    async useOnBlock(options) {
+      return useOnBlock(requireBot(bot), options);
     },
 
     async closeStrayWindow() {
@@ -3673,6 +3708,19 @@ async function collectSugarCane(
     return collected;
   } finally {
     request.signal.removeEventListener('abort', cancel);
+  }
+}
+
+/**
+ * 1.20.5 起的方块数据里，铁矿、金矿、钻石矿、黑曜石、金属块这些（93 种）的材质写成 incorrect_for_wooden_tool 之类，
+ * 速度表里这一项只有木头工具，没有石镐、铁镐、钻石镐：mineflayer 就按空手算挖的时间（钻石镐挖黑曜石算成 75 秒，实际 9.4 秒），
+ * 一直等到这个时间才告诉服务器挖完。这些都是镐子挖的方块：速度按 mineable/pickaxe 算（能不能挖下来仍按 harvestTools）
+ */
+export function fixPickaxeSpeeds(registry: any): void {
+  const pickaxe = registry?.materials?.['mineable/pickaxe'];
+  if (!pickaxe) return;
+  for (const name of Object.keys(registry.materials)) {
+    if (name.startsWith('incorrect_for_')) registry.materials[name] = { ...registry.materials[name], ...pickaxe };
   }
 }
 

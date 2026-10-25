@@ -34,6 +34,8 @@ interface JournalData {
   bed?: Spot & { at: number };
   deaths: (Spot & { at: number })[];
   deathCount: number;
+  /** 走过的传送门：两头的位置 */
+  portals?: { a: Spot; b: Spot; at: number }[];
   last?: Spot & { at: number; doing?: string; inventory?: string };
 }
 
@@ -176,6 +178,16 @@ export class WorldJournal {
     this.save();
   }
 
+  /** 走了一次传送门：两头记下（同一对门只记一次） */
+  addPortal(a: Spot, b: Spot): void {
+    // 主世界那头写在前面（从哪边走过来都一样）
+    if (b.dimension === 'overworld' && a.dimension !== 'overworld') [a, b] = [b, a];
+    const near = (p: Spot, q: Spot) => p.dimension === q.dimension && Math.abs(p.x - q.x) <= 3 && Math.abs(p.y - q.y) <= 3 && Math.abs(p.z - q.z) <= 3;
+    const same = (x: { a: Spot; b: Spot }) => (near(x.a, a) && near(x.b, b)) || (near(x.a, b) && near(x.b, a));
+    this.data.portals = [{ a, b, at: Date.now() }, ...(this.data.portals ?? []).filter((x) => !same(x))].slice(0, MAX_LIST);
+    this.save();
+  }
+
   /** 这局玩到哪了（结束时，以及玩的过程中每隔一阵：DSH 被直接关掉也有个大概） */
   setLast(spot: Spot, doing?: string, inventory?: string): void {
     this.data.last = { ...spot, at: Date.now(), ...(doing ? { doing } : {}), ...(inventory ? { inventory } : {}) };
@@ -209,6 +221,7 @@ export class WorldJournal {
     if (d.goal) out.push(`目标：${d.goal}`);
     if (d.places.length) out.push(`地点：${d.places.slice(0, limit).map((p) => `${p.name} ${at(p)}`).join('、')}${more(d.places.length)}`);
     if (d.bed) out.push(`床（复活点）：${at(d.bed)}`);
+    if (d.portals?.length) out.push(`传送门：${d.portals.slice(0, limit).map((x) => `${dimensionName(x.a.dimension)} (${x.a.x}, ${x.a.y}, ${x.a.z}) ↔ ${dimensionName(x.b.dimension)} (${x.b.x}, ${x.b.y}, ${x.b.z})`).join('；')}`);
     if (d.buildings.length) {
       out.push(`盖过：${d.buildings.slice(0, limit).map((b) => `「${b.name}」在 ${at(b)}${b.done >= b.total ? '，盖完了' : `，盖了 ${b.done}/${b.total} 块`}`).join('；')}${more(d.buildings.length)}`);
     }

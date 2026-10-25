@@ -93,6 +93,29 @@ export function createProductionActions(): MinecraftActionHandler[] {
       },
     },
     {
+      name: 'use_bucket',
+      async run(instruction, context) {
+        const position = positionArg(instruction.args.position);
+        if (!position) throw new Error('Missing Minecraft action argument: position');
+        const result = await context.adapter.useBucket({ item: stringArg(instruction.args.item, 'item'), position, signal: context.signal });
+        return { ...result, actionId: instruction.id };
+      },
+    },
+    {
+      name: 'use_on_block',
+      async run(instruction, context) {
+        const position = positionArg(instruction.args.position);
+        if (!position) throw new Error('Missing Minecraft action argument: position');
+        const result = await context.adapter.useOnBlock({
+          item: stringArg(instruction.args.item, 'item'),
+          position,
+          face: typeof instruction.args.face === 'string' ? instruction.args.face : undefined,
+          signal: context.signal,
+        });
+        return { ...result, actionId: instruction.id };
+      },
+    },
+    {
       name: 'smelt_item',
       async run(instruction, context) {
         const item = typeof instruction.args.item === 'string' ? instruction.args.item.trim() : undefined;

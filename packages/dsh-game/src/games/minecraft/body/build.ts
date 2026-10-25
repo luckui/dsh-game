@@ -115,6 +115,10 @@ export async function buildStructure(bot: any, req: BuildRequest, helpers: Build
 
   // 寻路器：不挖图纸上的格子、尽量不在图纸上垫方块；能垫泥土圆石爬上去
   const planned = new Set(all.map(key));
+  /** 要放方块的格子（垫柱子不能占；图纸上的空气格可以临时垫，盖完拆掉） */
+  const solidCells = new Set(req.blocks.map(key));
+  /** 给悬空的格子垫的临时柱子（盖完拆掉） */
+  const supports: Vec3[] = [];
   const oldMovements = bot.pathfinder.movements;
   const movements = protectMovementsFromFluid(bot, new Movements(bot));
   movements.allowParkour = false;
@@ -147,13 +151,13 @@ export async function buildStructure(bot: any, req: BuildRequest, helpers: Build
         const rank = (b: BuildBlock) => (hasNeighbour(bot, b) ? 0 : 1000) + me.distanceTo(new Vec3(b.x, b.y, b.z));
         row.sort((a, b) => rank(a) - rank(b));
         const b = row.shift()!;
-        await placeOne(bot, b, helpers).then(() => helpers.placed(b), (err: Error) => failed.push(`${b.name} at ${key(b)} (${err.message})`));
+        await placeOne(bot, b, helpers, solidCells, supports).then(() => helpers.placed(b), (err: Error) => failed.push(`${b.name} at ${key(b)} (${err.message})`));
       }
       helpers.progress(`${req.label}: layer ${i + 1}/${layers.length} done`);
     }
     for (const b of attached) {
       if (req.signal.aborted) throw new Error('cancelled');
-      await placeOne(bot, b, helpers).then(() => helpers.placed(b), (err: Error) => failed.push(`${b.name} at ${key(b)} (${err.message})`));
+      await placeOne(bot, b, helpers, solidCells, supports).then(() => helpers.placed(b), (err: Error) => failed.push(`${b.name} at ${key(b)} (${err.message})`));
     }
     // 补一遍：没放上的（当时没处贴着放、放偏了……）现在周围多半有东西了，再放一次
     const retry = req.blocks.filter((b) => !nameMatches(bot, b));
@@ -162,7 +166,7 @@ export async function buildStructure(bot: any, req: BuildRequest, helpers: Build
       retry.sort((a, b) => a.y - b.y);
       for (const b of retry) {
         if (req.signal.aborted) throw new Error('cancelled');
-        await placeOne(bot, b, helpers).then(() => helpers.placed(b), (err: Error) => failed.push(`${b.name} at ${key(b)} (${err.message})`));
+        await placeOne(bot, b, helpers, solidCells, supports).then(() => helpers.placed(b), (err: Error) => failed.push(`${b.name} at ${key(b)} (${err.message})`));
       }
     }
   } catch (err) {
@@ -191,6 +195,11 @@ export async function buildStructure(bot: any, req: BuildRequest, helpers: Build
       }
       if (!found) break;
     }
+    // 垫在悬空格子下面的柱子（可能在图纸范围外面）：从上往下拆
+    for (const p of supports.sort((a, b) => b.y - a.y)) {
+      const b = bot.blockAt(p);
+      if (b && SCAFFOLD.has(b.name)) await helpers.dig(p).then(() => { scaffold += 1; }).catch(() => {});
+    }
     await helpers.pickup(12).catch(() => {});
   } finally {
     bot.pathfinder.setMovements(oldMovements);
@@ -217,12 +226,39 @@ function hasNeighbour(bot: any, b: BuildBlock): boolean {
   });
 }
 
+/**
+ * 这一格悬空（六面都没东西能贴着放，比如门框两边竖边最底下那块在空着的角上面）：
+ * 在它下面垫一根临时的柱子，从下面的实心方块一直垫到它下面那格；柱子不占图纸上的格子，最多垫 6 格高
+ */
+async function propUp(bot: any, b: BuildBlock, helpers: BuildHelpers, planned: Set<string>, supports: Vec3[]): Promise<void> {
+  const column: Vec3[] = [];
+  for (let y = b.y - 1; y >= b.y - 6; y--) {
+    const p = new Vec3(b.x, y, b.z);
+    const at = bot.blockAt(p);
+    if (!at) break;
+    if (!isReplaceableForPlacement(at)) {
+      column.reverse();
+      for (const q of column) {
+        const filler = bot.inventory.items().find((i: any) => SCAFFOLD.has(i.name));
+        if (!filler) throw new Error('it would float, and there is no dirt or cobblestone to prop it up with');
+        await helpers.place(filler, q);
+        supports.push(q);
+      }
+      return;
+    }
+    if (planned.has(key(p))) break;
+    column.push(p);
+  }
+  throw new Error('it would float with nothing within 6 blocks below to prop it up on');
+}
+
 /** 放一块：有朝向要求的自己转好方向再放，别的交给 helpers.place */
-async function placeOne(bot: any, b: BuildBlock, helpers: BuildHelpers): Promise<void> {
+async function placeOne(bot: any, b: BuildBlock, helpers: BuildHelpers, planned: Set<string>, supports: Vec3[]): Promise<void> {
   if (matches(bot, b)) return;
   const item = bot.inventory.items().find((i: any) => i.name === b.name);
   if (!item) throw new Error(`no ${b.name} left`);
   const target = new Vec3(b.x, b.y, b.z);
+  if (!hasNeighbour(bot, b)) await propUp(bot, b, helpers, planned, supports);
   if (!b.props.facing && !b.props.half && !b.props.type) {
     await helpers.place(item, target);
     // 放方块的函数在目标附近找到同样的方块就算放好了：这里要的是正好这一格
