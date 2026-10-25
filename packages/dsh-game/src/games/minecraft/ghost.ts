@@ -1,10 +1,11 @@
 /**
- * 虚影：盖房子之前，在图纸的每一格放一个半透明的「方块展示实体」（block_display，1.19.4 起有），
- * 整座房子先以发光的玻璃虚影出现；她每放好一块真方块，那一格的虚影就消失，盖完正好没了。
+ * 虚影：盖房子之前，在图纸的每一格放一个「方块展示实体」（block_display，1.19.4 起有），
+ * 整座房子先以白模（不透明的白色方块，像建筑师的体块模型）出现；她每放好一块真方块，那一格的虚影就消失，盖完正好没了。
  * 给看的人看（摄像机客户端、直播画面、服务器上的玩家）；她自己看不到画面。要 RCON（命令由服务器执行）。
+ * 主人看过彩色玻璃和白模并排比：玻璃是透明的，平的一面只有一层，后面的东西透出来，像缺了一块；白模是实心的，体积清楚。
  *
- * 颜色按材料分：木头橙、石头灰、玻璃浅蓝、门和火把黄、黑曜石紫、羊毛粉、泥土沙子黄绿，别的白。
- * 每块带同色的发光描边（Glowing）：连在一起的虚影描出整座房子的轮廓，隔着墙、在远处也看得清。
+ * 材料在描边的颜色上（Glowing 的发光描边）：木头橙、石头灰、玻璃浅蓝、门和火把黄、黑曜石紫、羊毛粉、泥土沙子黄绿，别的白。
+ * 连在一起的虚影描出整座房子的轮廓，隔着墙、在远处也看得清。
  * 虚影比一格小一点点（0.96），真方块放上去时不会和它闪烁打架。
  */
 import { rconBatch, type RconTarget } from './rcon.js';
@@ -30,7 +31,7 @@ function glassFor(name: string): string {
   return 'white_stained_glass';
 }
 
-/** 描边颜色：和玻璃同色，亮一点 */
+/** 描边颜色：按材料分（键是材料归到的那种彩色玻璃名） */
 const GLOW: Record<string, number> = {
   light_blue_stained_glass: 0x7fd4ff,
   yellow_stained_glass: 0xffe066,
@@ -58,7 +59,7 @@ export class GhostBuild {
       const spots = /_door$/.test(c.name) ? [c, { ...c, y: c.y + 1 }] : [c];
       const glass = glassFor(c.name);
       for (const p of spots) {
-        commands.push(`summon block_display ${p.x + 0.5} ${p.y + 0.5} ${p.z + 0.5} {block_state:{Name:"minecraft:${glass}"},`
+        commands.push(`summon block_display ${p.x + 0.5} ${p.y + 0.5} ${p.z + 0.5} {block_state:{Name:"minecraft:white_concrete"},`
           + `transformation:{left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f],translation:[-0.48f,-0.48f,-0.48f],scale:[0.96f,0.96f,0.96f]},`
           + `brightness:{sky:15,block:15},Glowing:1b,glow_color_override:${GLOW[glass]},Tags:["dsh_ghost","dsh_ghost_${this.id}","dsh_ghost_${this.id}_y${p.y}","${tagOf(this.id, p)}"]}`);
       }
