@@ -394,18 +394,24 @@ export const GAMES = {
   },
   minecraft: {
     title: 'Minecraft',
-    library: (): LibraryEntry => ({
+    library: (): LibraryEntry => {
+      const setup = mcSetup.load();
+      const creative = setup.gameMode === 'creative';
+      return {
       id: 'minecraft',
       name: 'Minecraft',
-      subtitle: 'Java 版 · 生存',
-      tags: ['沙盒', '生存', '服务器'],
-      blurb: `大肥鱼以 ${mcSetup.load().username} 的身份进一个 Minecraft 服务器自己玩：砍树、合成、挖矿、打怪，跟她说想看什么她就去做。服务器、摄像机这些在下面的开局设置里。`,
+      subtitle: `Java 版 · ${creative ? '创造' : '生存'}`,
+      tags: ['沙盒', creative ? '创造' : '生存', '服务器'],
+      blurb: creative
+        ? `大肥鱼以 ${setup.username} 的身份进一个 Minecraft 服务器，开创造模式：自己设计建筑，看着它一层层长出来；跟她说想看什么她就去盖。服务器、摄像机这些在下面的开局设置里。`
+        : `大肥鱼以 ${setup.username} 的身份进一个 Minecraft 服务器自己玩：砍树、合成、挖矿、打怪，跟她说想看什么她就去做。服务器、摄像机这些在下面的开局设置里。`,
       installed: true,
       getUrl: 'https://www.minecraft.net/',
       savedAt: null,
       // 方块人大肥鱼的封面和横幅（Codex 画的，tools/minecraft-art.mjs）
       localArt: { capsule: 'minecraft/capsule.jpg', hero: 'minecraft/cover.jpg' },
-    }),
+      };
+    },
     create: () => {
       const setup = mcSetup.load();
       return new MinecraftSession({
