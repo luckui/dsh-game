@@ -45,6 +45,10 @@ const CAMERA_OPTIONS: Record<string, string> = {
   lang: 'zh_cn',
   renderDistance: '10',
   guiScale: '2',
+  // 1.21.2 起「非活动帧率限制」默认 afk：一分钟没有键鼠输入限到 30 帧，再过 9 分钟限到 10 帧。
+  // 摄像机客户端从来没人操作，直播大部分时间都是 10 帧（直播科在服务器上实测：afk 11 分钟后约 10 帧，minimized 一直约 33 帧）
+  inactivityFpsLimit: 'minimized',
+  maxFps: '60',
 };
 
 /** 找 .minecraft：先看主人填的，再看官方启动器的默认位置 */
