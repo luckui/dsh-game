@@ -11,6 +11,7 @@ import { goals } from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
 import type { MinecraftActionErrorCode, MinecraftActionResult } from './contracts.js';
 import { patchedGoto } from './patchedGoto.js';
+import { confirmDug } from './digAck.js';
 
 const BUCKETS = new Set(['bucket', 'water_bucket', 'lava_bucket']);
 const LIQUID_OF: Record<string, string> = { water_bucket: 'water', lava_bucket: 'lava' };
@@ -49,7 +50,8 @@ const isSource = (b: any) => !!b && (b.name === 'water' || b.name === 'lava') &&
 const solid = (b: any) => !!b && b.boundingBox === 'block';
 const inNether = (bot: any) => String(bot.game?.dimension ?? '').includes('nether');
 
-const SEE_THROUGH = new Set(['air', 'cave_air', 'void_air', 'water']);
+// 传送门也挡不住：站在传送门里往外倒水，服务器的视线穿过去（庄稼不一样：站在长高的胡萝卜里倒水，水会倒进自己那一格）
+const SEE_THROUGH = new Set(['air', 'cave_air', 'void_air', 'water', 'nether_portal']);
 /** 挡视线时可以随手挖掉的：杂草、雪层（庄稼、火把、花不在里面） */
 const WEEDS = new Set(['short_grass', 'grass', 'tall_grass', 'fern', 'large_fern', 'dead_bush', 'snow']);
 
@@ -57,8 +59,7 @@ const WEEDS = new Set(['short_grass', 'grass', 'tall_grass', 'fern', 'large_fern
 function blockerOnLine(bot: any, eye: Vec3, aim: Vec3, allowed: Vec3[], ignoreWeeds = false): any | null {
   const d = aim.minus(eye);
   const len = d.norm();
-  // 她自己站着的两格（脚、头）里的东西不算：服务器的视线从她眼睛出发，不会被她身子所在那格里的传送门、矮庄稼挡住
-  const skip = new Set([...allowed, eye.floored(), eye.offset(0, -1, 0).floored()].map(fmt));
+  const skip = new Set(allowed.map(fmt));
   for (let t = 0; t < len; t += 0.05) {
     const p = eye.plus(d.scaled(t / len)).floored();
     if (skip.has(fmt(p))) continue;
@@ -168,6 +169,9 @@ export async function useBucket(bot: any, req: { item: string; position: { x: nu
       return result(started, before, bot, 'failed', `could not get a clear line of sight into ${fmt(target)} (${what})`, 'blocked');
     }
     await bot.lookAt(aimOf(face), true);
+    // 站在哪、瞄的哪一格的哪一面：倒歪了能看出来
+    const sideName = Object.entries(SIDES).find(([, d]) => d.equals(face.d))?.[0] ?? '?';
+    const how = `standing at ${fmt(bot.entity.position.floored())}, aimed at the ${sideName} of ${bot.blockAt(face.against)?.name ?? '?'} at ${fmt(face.against)}`;
     await sleep(100);
     bot.activateItem();
     await sleep(1500);
@@ -175,9 +179,16 @@ export async function useBucket(bot: any, req: { item: string; position: { x: nu
     const changed = changes(was, now);
     const emptied = (counts(bot)[req.item] ?? 0) < (before[req.item] ?? 0);
     const formed = changed.filter((c) => /→ (obsidian|cobblestone|stone)$/.test(c));
-    if (!emptied) return result(started, before, bot, 'failed', `could not pour the ${liquid} at ${fmt(target)}`, 'blocked');
+    if (!emptied) return result(started, before, bot, 'failed', `could not pour the ${liquid} at ${fmt(target)} (${how})`, 'blocked');
     if (liquid === 'water' && inNether(bot) && bot.blockAt(target)?.name !== 'water') {
       return result(started, before, bot, 'succeeded', `poured the water out at ${fmt(target)}, and it evaporated at once (water cannot exist in the Nether)`);
+    }
+    // 倒出去了，但不在那一格（视线被别的东西挡了）：照实说流到哪了
+    const landed = bot.blockAt(target);
+    // 要是源头：旁边倒歪了流进来的是流动的水（level 不是 0），不算倒进去了
+    if (!formed.length && !(landed?.name === liquid && isSource(landed))) {
+      const went = changed.filter((c) => new RegExp(`→ ${liquid}`).test(c)).join('; ') || 'nowhere nearby';
+      return result(started, before, bot, 'failed', `the ${liquid} did not land in ${fmt(target)} but here: ${went} (${how})`, 'blocked');
     }
     const notes = formed.length ? `; ${formed.map((c) => c.replace(/: (lava|water) → /, ': $1 turned into ')).join('; ')}` : '';
     return result(started, before, bot, 'succeeded', `poured ${liquid} at ${fmt(target)}${notes}`);
@@ -238,7 +249,11 @@ export async function digAt(bot: any, req: { position: { x: number; y: number; z
   try {
     await reach(bot, target, req.signal);
     await bot.tool?.equipForBlock?.(block, {}).catch?.(() => {});
-    await bot.dig(bot.blockAt(target), true);
+    const dug = bot.blockAt(target);
+    await bot.dig(dug, true);
+    // 以服务器为准：mineflayer 挖完先在自己这边记成空气，服务器不认要过一会儿才改回来
+    const verdict = await confirmDug(bot, dug);
+    if (verdict) return result(started, before, bot, 'failed', `did not dig ${block.name} at ${fmt(target)}: ${verdict}`, /never got within reach/.test(verdict) ? 'path_unreachable' : 'dig_rejected');
     await sleep(300);
     await pickup(4).catch(() => {});
     // 掉下来的东西还在飞、掉进刚挖的坑里：等一下再捡一次

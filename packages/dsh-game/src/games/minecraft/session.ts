@@ -151,6 +151,7 @@ const ERROR_TEXT: Record<string, string> = {
   recipe_unavailable: '合不出来（没有配方，或者缺工作台 / 材料）',
   inventory_desync: '背包对不上，停下了',
   craft_rejected: '合成被游戏拒绝了',
+  dig_rejected: '游戏没让挖（服务器没认这次挖掘，方块还在）',
   adapter_error: '出错了',
 };
 

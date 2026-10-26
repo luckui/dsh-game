@@ -22,6 +22,7 @@ import { digAt as digOne, useBucket, useOnBlock } from './useItems.js';
 import { flyTo, openSkySpots } from './flight.js';
 import { scanTerrain } from './terrain.js';
 import { FollowCam } from './followCam.js';
+import { trackDigAcks, confirmDug } from './digAck.js';
 import { placeBlockAt as airiPlaceBlockAt, breakBlockAt, isInteractive, isReplaceableForPlacement, type PlaceFace } from './placeBlock.js';
 import { Vec3 } from 'vec3';
 import { runAdaptiveCollection } from './collectionStrategy.js';
@@ -478,6 +479,9 @@ export function createMineflayerAdapter(
     });
     bot = current;
     current.once('login', () => fixPickaxeSpeeds(current.registry));
+    trackDigAcks(current);
+    // pvp 插件在 spawn 前才装好：装好以后接管它举盾的时机
+    current.once('spawn', () => tunePvpShield(current));
     guardOwnOxygen(current);
     stopFollowSession();
     lastBreathablePosition = undefined;
@@ -767,6 +771,8 @@ export function createMineflayerAdapter(
     missingTool?: number;
     /** 没采到的那几块：位置和原因（给她看） */
     failures?: string[];
+    /** 挖到的那几块在哪（结束时看旁边还剩几块同样的） */
+    mined?: Vec3[];
   }> {
     const current = requireBot(bot);
     const ids = new Map<string, number>();
@@ -816,6 +822,7 @@ export function createMineflayerAdapter(
     let skipped = 0;
     let missingTool = 0;
     const failures: string[] = [];
+    const mined: Vec3[] = [];
     const byName: Record<string, number> = {};
     for (const candidate of blocks) {
       if (request.signal.aborted) throw abortError();
@@ -836,13 +843,12 @@ export function createMineflayerAdapter(
       });
       try {
         await collectSingleBlock(current, candidate, request.signal);
-        // 挖完核对：方块还在原地就不算（挖到一半被打断，collectblock 照样当挖完了）
-        const still = current.blockAt(candidate.position);
-        if (still && still.type === candidate.type) {
-          const away = distanceToBot(current, candidate.position);
-          throw new Error(away > 5 ? `never got within reach (still ${away.toFixed(0)} blocks away)` : 'dug at it but the block is still there');
-        }
+        // 挖完以服务器为准：mineflayer 挖完先在自己这边把方块记成空气（它的 dig 也是看到这个才算挖完），
+        // 服务器不认（够不着、不让挖）要过一会儿才发包改回来。等服务器对这次挖掘的回执，再看方块还在不在
+        const verdict = await confirmDug(current, candidate);
+        if (verdict) throw new Error(verdict);
         total += 1;
+        mined.push(candidate.position.clone());
         const name = nameById.get(candidate.type) ?? candidate.name;
         byName[name] = (byName[name] ?? 0) + 1;
         emit({
@@ -863,7 +869,7 @@ export function createMineflayerAdapter(
         });
       }
     }
-    return { total, byName, skipped, missingTool, failures };
+    return { total, byName, skipped, missingTool, failures, mined };
   }
 
   /** 走到够得着的地方，换上合适的工具，挖掉这一格；盖房子时草、雪这类能直接放东西的不挖（skipReplaceable） */
@@ -980,6 +986,7 @@ export function createMineflayerAdapter(
     let skippedTotal = 0;
     const exclude = new Set<string>();
     const failures: string[] = [];
+    const minedAt: Vec3[] = [];
     let missingToolTotal = 0;
     let observedTargetCount = before[targetItem] ?? 0;
     let sweepNumber = 0;
@@ -1003,6 +1010,7 @@ export function createMineflayerAdapter(
         brokenTotal += swept.total;
         skippedTotal += swept.skipped ?? 0;
         failures.push(...(swept.failures ?? []));
+        minedAt.push(...(swept.mined ?? []));
         missingToolTotal += swept.missingTool ?? 0;
         for (const [name, count] of Object.entries(swept.byName)) {
           brokenByName[name] = (brokenByName[name] ?? 0) + count;
@@ -1039,6 +1047,11 @@ export function createMineflayerAdapter(
       name,
       count,
     }));
+    // 一窝矿：挖过的每一块周围 3 格内还有同样的，告诉她在哪（挖够了数就停，旁边剩的她自己决定挖不挖）
+    const leftNearby = veinLeftovers(current, minedAt, sourceBlocks);
+    const veinText = leftNearby.length
+      ? `; ${leftNearby.length} more ${sourceBlocks.length === 1 ? sourceBlocks[0] : 'of them'} right next to where you mined: ${leftNearby.slice(0, 8).join(', ')}${leftNearby.length > 8 ? ', …' : ''}`
+      : '';
     const skippedText = skippedTotal > 0
       ? `; could not mine ${skippedTotal} of them: ${failures.slice(0, 5).join('; ')}${failures.length > 5 ? '; …' : ''}`
       : '';
@@ -1079,7 +1092,7 @@ export function createMineflayerAdapter(
       actionId: '',
       outcome: reached ? 'succeeded' : 'partial',
       summary: reached
-        ? `collected ${gained} ${targetItem} by breaking ${brokenText}`
+        ? `collected ${gained} ${targetItem} by breaking ${brokenText}${veinText}`
         : `collected ${gained}/${options.maxCount} ${targetItem} by breaking ${brokenText}${missingToolText}${skippedText}${
           collection.stoppedBy === 'sweeps'
             ? `; stopped after ${collection.sweeps} rounds (there may be more ${sourceText} around${chancy ? `; ${targetItem} only drops sometimes` : ''})`
@@ -2282,11 +2295,13 @@ export function createMineflayerAdapter(
     if (!item) return craftFailure('missing_item', `no ${options.item} in inventory to hold or wear`, started);
     const destination = equipDestinationFor(itemName);
     await current.equip(item, destination);
-    const wearing = destination !== 'hand';
+    const wearing = destination !== 'hand' && destination !== 'off-hand';
     return {
       actionId: '',
       outcome: 'succeeded',
-      summary: wearing ? `wearing ${item.name} on ${destination}` : `holding ${item.name}`,
+      summary: destination === 'off-hand'
+        ? `holding ${item.name} in the off hand (it is raised automatically in fights)`
+        : wearing ? `wearing ${item.name} on ${destination}` : `holding ${item.name}`,
       durationMs: Date.now() - started,
       inventoryDelta: {},
       worldChanges: [],
@@ -2671,6 +2686,8 @@ export function createMineflayerAdapter(
       if (!entity) return actionFailure('defend', 'the attacker is gone', 'target_not_found');
       const heldBefore: string | null = current.heldItem?.name ?? null;
       const weapon = await equipBestWeapon(current).catch(() => null);
+      current.__inCombat = true;
+      raiseShield(current);
       let killed = false;
       try {
         await current.pvp?.attack?.(entity);
@@ -2682,6 +2699,8 @@ export function createMineflayerAdapter(
         }
       } finally {
         await current.pvp?.stop?.();
+        current.__inCombat = false;
+        lowerShield(current);
         if (weapon && heldBefore && heldBefore !== weapon) {
           const back = current.inventory?.items?.().find((i: any) => i.name === heldBefore);
           if (back) await current.equip(back, 'hand').catch(() => {});
@@ -2936,6 +2955,9 @@ export function createMineflayerAdapter(
       const heldBefore: string | null = current.heldItem?.name ?? null;
       const weapon = await equipBestWeapon(current);
       if (weapon) report('info', `holding ${weapon}${heldBefore && heldBefore !== weapon ? ` (was ${heldBefore})` : ''}`);
+      // 副手有盾：一开打就举起来（靠近的路上挡箭）；pvp 插件出手前放下、砍完再举
+      current.__inCombat = true;
+      if (raiseShield(current)) report('info', 'shield up');
       try {
         if (options.kill && current.pvp?.attack) {
           while (confirmed < options.quantity) {
@@ -3015,6 +3037,9 @@ export function createMineflayerAdapter(
           observations,
         };
       } finally {
+        current.__inCombat = false;
+        // pvp 插件停手时不放盾：一直举着走路会慢得像潜行
+        lowerShield(current);
         if (weapon && heldBefore && heldBefore !== weapon) {
           const back = current.inventory?.items?.().find((i: any) => i.name === heldBefore);
           if (back) await current.equip(back, 'hand').catch(() => {});
@@ -3297,6 +3322,82 @@ function inventoryFullText(bot: any, item: string): string | null {
   return `the inventory is full (all 36 slots used), so nothing new can be picked up. Taking the most room: ${list}. Throw away what you do not need with drop (e.g. drop ${biggest[0]?.[0] ?? 'cobblestone'} 64), then try again`;
 }
 
+/**
+ * 打会射箭的怪时盾才有用：pvp 插件每次出手前放下盾、砍完 150 毫秒再举，盾举起要 5 刻（0.25 秒）才挡得住，
+ * 两次出手之间几乎一直是空档；骷髅贴脸也射箭，正好射在空档里（测试：带盾比不带盾掉血还多）。
+ * 改成真人的打法：目标在拉弓（living_entity_flags 最低位：手正在用），盾举着不放、先不砍，射完了再出手。
+ * 举没举由这里自己记：已经举着再发一次「举」，服务器会把那 5 刻重新算；mineflayer 自己的 usingHeldItem 会被别的实体的状态包清掉，靠不住
+ */
+function tunePvpShield(bot: any): void {
+  const pvp = bot.pvp;
+  if (!pvp || pvp.__shieldTuned || typeof pvp.attemptAttack !== 'function') return;
+  pvp.__shieldTuned = true;
+  let raised = false;
+  let loweredAt = 0;
+  const activate = bot.activateItem.bind(bot);
+  const deactivate = bot.deactivateItem.bind(bot);
+  bot.activateItem = (offHand = false) => {
+    raised = !!offHand;
+    bot.__shieldRaisedAt = raised ? Date.now() : 0;
+    return activate(offHand);
+  };
+  bot.deactivateItem = () => {
+    raised = false;
+    loweredAt = Date.now();
+    bot.__shieldRaisedAt = 0;
+    return deactivate();
+  };
+  // 在打（打怪、还手的整个动作里，包括换下一只的空档）、副手有盾、盾没举着、也不是正在出手（放下不到 0.4 秒）：举起来。
+  // pvp 插件出手那一串里目标一死就抛错退出，最后「再举起来」那步不做，盾就一直放着去追下一只
+  bot.on('physicsTick', () => {
+    if (!(pvp.target || bot.__inCombat) || raised || Date.now() - loweredAt < 400 || !pvp.hasShield()) return;
+    bot.activateItem(true);
+  });
+  const flagsIndex = bot.registry?.entitiesByName?.skeleton?.metadataKeys?.indexOf?.('living_entity_flags') ?? 8;
+  const drawing = (entity: any) => (Number(entity?.metadata?.[flagsIndex] ?? 0) & 1) === 1;
+  const attempt = pvp.attemptAttack.bind(pvp);
+  pvp.attemptAttack = function attemptAttackWithShield(this: any) {
+    if (this.target && this.wasInRange && this.hasShield() && drawing(this.target)) {
+      if (!raised) bot.activateItem(true);
+      this.timeToNextAttack = 2;
+      return;
+    }
+    return attempt();
+  };
+}
+
+/** 挖过的那几格周围 3 格内还剩的同样方块（「x y z」，近的在前，去重） */
+function veinLeftovers(bot: any, minedAt: Vec3[], names: string[]): string[] {
+  if (!minedAt.length) return [];
+  const wanted = new Set(names);
+  const seen = new Set<string>();
+  const found: { key: string; d: number }[] = [];
+  for (const at of minedAt) {
+    for (let dx = -3; dx <= 3; dx++) for (let dy = -3; dy <= 3; dy++) for (let dz = -3; dz <= 3; dz++) {
+      const p = at.offset(dx, dy, dz);
+      const key = `${p.x} ${p.y} ${p.z}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (wanted.has(bot.blockAt(p)?.name)) found.push({ key, d: bot.entity.position.distanceTo(p) });
+    }
+  }
+  return found.sort((a, b) => a.d - b.d).map((f) => f.key);
+}
+
+/** 副手是盾就举起来（返回举没举） */
+function raiseShield(bot: any): boolean {
+  const off = bot.inventory?.slots?.[45];
+  if (!off || off.name !== 'shield') return false;
+  // 已经举着就不再发：再发一次服务器会把举盾生效的那 5 刻重新算
+  if (!bot.__shieldRaisedAt) bot.activateItem?.(true);
+  return true;
+}
+
+/** 放下手里在用的（举着的盾）；副手不是盾就不动 */
+function lowerShield(bot: any): void {
+  if (bot.inventory?.slots?.[45]?.name === 'shield') bot.deactivateItem?.();
+}
+
 /** 打怪用的武器，好的在前：剑比斧子出手快，先挑剑；没有剑才用斧子 */
 const WEAPONS = [
   'netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'golden_sword', 'wooden_sword',
@@ -3312,8 +3413,10 @@ async function equipBestWeapon(bot: any): Promise<string | null> {
   return best.name;
 }
 
-function equipDestinationFor(itemName: string): 'hand' | 'head' | 'torso' | 'legs' | 'feet' {
+function equipDestinationFor(itemName: string): 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet' {
   const name = normalizeMinecraftLookupName(itemName);
+  // 盾牌放副手：主手照样拿剑、镐子；打怪时 pvp 插件看副手有盾就会用（出手前放下、砍完举起）
+  if (name === 'shield') return 'off-hand';
   if (name.endsWith('_helmet') || name === 'pumpkin' || name === 'carved_pumpkin') return 'head';
   if (name.endsWith('_chestplate') || name === 'elytra') return 'torso';
   if (name.endsWith('_leggings')) return 'legs';
@@ -3818,8 +3921,12 @@ async function walkPickupDrops(
     const tries = attempts.get(entityKey(item)) ?? 0;
     if (!tries) found += 1;
     attempts.set(entityKey(item), tries + 1);
+    const goal = new GoalPickup(bot, item.position);
+    // 先算一遍路：只有半截路（走不到）的不追——寻路器照样会顺着半截路往那边走，在平台边、悬崖边就走下去了
+    const plan = bot.pathfinder.getPathTo?.(bot.pathfinder.movements, goal, 2000);
+    if (plan && plan.status !== 'success') continue;
     // 走不过去的（寻路器找不到路时会一直挂着，不报错）8 秒就算了，不让捡东西卡住整个动作
-    if (!(await gotoWithin(bot, new GoalPickup(bot, item.position), 8_000))) continue;
+    if (!(await gotoWithin(bot, goal, 8_000))) continue;
     if (await waitForItemPickup(bot, item, signal)) picked += 1;
   }
   return { found, picked, inventoryDelta: inventoryDifference(before, inventoryCounts(bot)) };

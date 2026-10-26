@@ -58,6 +58,7 @@ export type MinecraftActionErrorCode =
   | 'recipe_unavailable'
   | 'inventory_desync'
   | 'craft_rejected'
+  | 'dig_rejected'
   | 'adapter_error';
 
 export interface MinecraftFact {

@@ -703,6 +703,139 @@ async function liveCases(): Promise<void> {
     await rcon(`fill ${LX - 22} ${LY} ${LZ - 5} ${LX + 22} ${LY} ${LZ + 5} grass_block`);
   }
 
+  if (want('盾牌：equip 放进副手')) {
+    begin('盾牌：equip shield 放进副手');
+    await liveReset();
+    await rcon(`give ${NAME} shield 1`);
+    await rcon(`give ${NAME} iron_sword 1`);
+    await sleep(800);
+    const r = await session.act({ action: 'equip', name: 'shield' });
+    await sleep(500);
+    const off = await rcon(`data get entity ${NAME} equipment.offhand.id`);
+    const off2 = await rcon(`data get entity ${NAME} Inventory[{Slot:-106b}].id`);
+    note(`equip：${r.slice(0, 80)}；副手：${off} / ${off2}`);
+    check(/shield/.test(off + off2), '盾在副手');
+    await session.act({ action: 'equip', name: 'iron_sword' });
+    await sleep(500);
+    check((await heldItem()) === 'iron_sword' && /shield/.test((await rcon(`data get entity ${NAME} equipment.offhand.id`)) + (await rcon(`data get entity ${NAME} Inventory[{Slot:-106b}].id`))), '再拿剑：剑在手上、盾还在副手');
+  }
+
+  if (want('盾牌：打骷髅')) {
+    begin('盾牌：晚上打两只骷髅（真实伤害，不给免伤）：带盾不死、都打死；不带盾作对照');
+    await rcon('time set 18000');
+    const fight = async (withShield: boolean) => {
+      await liveReset();
+      await rcon(`effect clear ${NAME}`);
+      await rcon(`give ${NAME} iron_sword 1`);
+      if (withShield) await rcon(`give ${NAME} shield 1`);
+      await sleep(800);
+      if (withShield) await session.act({ action: 'equip', name: 'shield' });
+      await session.act({ action: 'equip', name: 'iron_sword' });
+      await rcon(`effect give ${NAME} instant_health 1 5 true`);
+      await sleep(500);
+      await rcon(`summon skeleton ${LX + 12} ${LY + 1} ${LZ + 2}`);
+      await rcon(`summon skeleton ${LX + 12} ${LY + 1} ${LZ - 2}`);
+      const t0 = Date.now();
+      const line = await act('attack', { name: 'skeleton', index: 2 }, 120_000);
+      const heard: string[] = [];
+      for (let i = 0; i < 3; i++) heard.push(...(await session.wait(AbortSignal.timeout(1000), 1000)).lines);
+      const died = [line, ...heard].some((l) => /死了/.test(l));
+      const health = Number((await rcon(`data get entity ${NAME} Health`)).match(/([\d.]+)f/)?.[1] ?? -1);
+      const left = Number((await rcon(`execute if entity @e[type=skeleton,x=${LX},y=${LY},z=${LZ},distance=..40]`)).match(/count: (\d+)/)?.[1] ?? 0);
+      note(`${withShield ? '带盾' : '不带盾'}：${Math.round((Date.now() - t0) / 1000)} 秒，死了 ${died}，剩血 ${health}，剩骷髅 ${left}；${line.slice(0, 120)}`);
+      const raised = /shield/.test(await rcon(`data get entity ${NAME} SelectedItem.id`)) ? 'held' : '';
+      void raised;
+      await rcon(`kill @e[type=skeleton,x=${LX},y=${LY},z=${LZ},distance=..60]`);
+      await rcon(`kill @e[type=arrow,x=${LX},y=${LY},z=${LZ},distance=..60]`);
+      return { died, health, left };
+    };
+    const without: Array<{ died: boolean; health: number; left: number }> = [];
+    const shielded: Array<{ died: boolean; health: number; left: number }> = [];
+    for (let i = 0; i < 3; i++) {
+      without.push(await fight(false));
+      shielded.push(await fight(true));
+    }
+    for (const [i, r] of shielded.entries()) check(!r.died && r.left === 0, `带盾第 ${i + 1} 场：没死、两只都打死（剩血 ${r.health}，剩 ${r.left} 只）`);
+    const lost = (rs: typeof shielded) => (rs.reduce((a, r) => a + (r.died ? 20 : 20 - r.health), 0) / rs.length).toFixed(1);
+    note(`平均掉血：带盾 ${lost(shielded)}，不带盾 ${lost(without)}（死了算掉 20）`);
+    await rcon('time set day');
+  }
+
+  if (want('浮空平台：不追够不着的东西')) {
+    begin('浮空平台：下面 10 格的羊毛够不着、地上的掉落物走不到，都不能把她引下平台（连做 3 遍）');
+    for (let i = 0; i < 3; i++) {
+      await liveReset();
+      const F = { x: LX + 10, y: LY + 12, z: LZ + 10 };
+      await rcon(`fill ${F.x - 1} ${F.y} ${F.z - 1} ${F.x + 1} ${F.y} ${F.z + 1} dirt`);
+      await rcon(`setblock ${F.x} ${F.y - 10} ${F.z} white_wool`);
+      for (const [dx, dz] of [[3, 0], [0, 4], [-3, 2]]) await rcon(`summon item ${F.x + dx + 0.5} ${LY + 1} ${F.z + dz + 0.5} {Item:{id:"minecraft:stick",count:1}}`);
+      await rcon(`tp ${NAME} ${F.x + 0.5} ${F.y + 1} ${F.z + 0.5}`);
+      await sleep(1500);
+      const line = await act('collect', { name: 'white_wool', index: 1 }, 120_000);
+      const pos = await herPos();
+      note(line.slice(0, 200));
+      check(pos.length === 3 && pos[1] >= F.y, `第 ${i + 1} 遍：还在平台上（y=${pos[1]?.toFixed(1)}）`);
+      check(!/做完了/.test(line) && !/breaking 1 white_wool/.test(line) && /never got within reach|no progress/.test(line), `第 ${i + 1} 遍：没说采到，说了够不着（${line.slice(0, 160)}）`);
+      await rcon(`fill ${F.x - 1} ${F.y - 10} ${F.z - 1} ${F.x + 1} ${F.y} ${F.z + 1} air`);
+    }
+  }
+
+  if (want('直播 5：采够数时说旁边还剩几块')) {
+    begin('直播 5：一窝 4 块钻石矿只采 1 块，告诉她旁边还剩哪 3 块');
+    await liveReset();
+    await rcon(`give ${NAME} iron_pickaxe 1`);
+    await rcon(`fill ${LX + 3} ${LY + 1} ${LZ - 2} ${LX + 7} ${LY + 4} ${LZ + 2} stone`);
+    const ores = [[LX + 3, LY + 1, LZ], [LX + 4, LY + 1, LZ], [LX + 4, LY + 2, LZ], [LX + 5, LY + 1, LZ + 1]];
+    for (const [x, y, z] of ores) await rcon(`setblock ${x} ${y} ${z} diamond_ore`);
+    await sleep(1000);
+    const line = await act('collect', { name: 'diamond_ore', index: 1 }, 90_000);
+    note(line.slice(0, 300));
+    const left = [];
+    for (const [x, y, z] of ores) if (/passed/i.test(await rcon(`execute if block ${x} ${y} ${z} diamond_ore`))) left.push(`${x} ${y} ${z}`);
+    check(left.length === 3 && left.every((p) => line.includes(p)), `剩下的 3 块都列出来了（剩 ${left.join('；')}）`);
+    await rcon(`fill ${LX + 3} ${LY + 1} ${LZ - 2} ${LX + 7} ${LY + 4} ${LZ + 2} air`);
+  }
+
+  if (want('服务器驳回挖掘')) {
+    begin('服务器驳回挖掘（冒险模式不让挖）：不能说挖到了，以服务器为准');
+    await liveReset();
+    await rcon(`give ${NAME} iron_pickaxe 1`);
+    await rcon(`fill ${LX + 2} ${LY + 1} ${LZ - 1} ${LX + 2} ${LY + 2} ${LZ + 1} dirt`);
+    await rcon(`gamemode adventure ${NAME}`);
+    await sleep(1000);
+    const line = await act('collect', { name: 'dirt', index: 1 }, 90_000);
+    const dug = await act('dig', { text: `${LX + 2} ${LY + 1} ${LZ}` }, 60_000);
+    await rcon(`gamemode survival ${NAME}`);
+    note(line.slice(0, 220));
+    note(dug.slice(0, 220));
+    const still = /passed/i.test(await rcon(`execute if block ${LX + 2} ${LY + 1} ${LZ} dirt`));
+    check(still, '服务器那边泥土还在');
+    check(!/做完了/.test(line) && !/breaking [1-9]/.test(line), `collect 没说挖到（${line.slice(0, 140)}）`);
+    check(!/做完了/.test(dug), `dig 没说挖掉了（${dug.slice(0, 140)}）`);
+    await rcon(`fill ${LX + 2} ${LY + 1} ${LZ - 1} ${LX + 2} ${LY + 2} ${LZ + 1} air`);
+  }
+
+  if (want('倒水：站在熟胡萝卜里')) {
+    begin('倒水：她站在长熟的胡萝卜那一格里（坑就在旁边），水要进坑');
+    for (let i = 0; i < 4; i++) {
+      await liveReset({ x: LX + 4, z: LZ + 3 });
+      await rcon(`fill ${LX + 3} ${LY} ${LZ + 3} ${LX + 4} ${LY} ${LZ + 4} farmland[moisture=7]`);
+      await rcon(`fill ${LX + 3} ${LY + 1} ${LZ + 3} ${LX + 4} ${LY + 1} ${LZ + 4} carrots[age=7]`);
+      await rcon(`setblock ${LX + 5} ${LY} ${LZ + 3} air`);
+      await rcon(`give ${NAME} water_bucket 1`);
+      await rcon(`tp ${NAME} ${LX + 4.5} ${LY + 1} ${LZ + 3.5}`);
+      await sleep(1200);
+      const line = await act('bucket', { name: 'water_bucket', text: `${LX + 5} ${LY} ${LZ + 3}` }, 60_000);
+      const source = /passed/i.test(await rcon(`execute if block ${LX + 5} ${LY} ${LZ + 3} water[level=0]`));
+      let carrots = 0;
+      for (const [x, z] of [[3, 3], [3, 4], [4, 3], [4, 4]]) if (/passed/i.test(await rcon(`execute if block ${LX + x} ${LY + 1} ${LZ + z} carrots`))) carrots++;
+      check(source && carrots === 4, `第 ${i + 1} 遍：坑里是水源 ${source}，胡萝卜还剩 ${carrots}/4（${line.slice(0, 140)}）`);
+      await rcon(`fill ${LX + 1} ${LY - 1} ${LZ + 1} ${LX + 9} ${LY - 1} ${LZ + 7} dirt`);
+      await rcon(`fill ${LX + 1} ${LY} ${LZ + 1} ${LX + 9} ${LY} ${LZ + 7} grass_block`);
+      await rcon(`fill ${LX + 1} ${LY + 1} ${LZ + 1} ${LX + 9} ${LY + 2} ${LZ + 7} air`);
+    }
+  }
+
   if (want('直播 4：看门狗（单测）')) {
     begin('直播 4：看门狗（单测）：不动就报、在挖或在走近不报');
     const { stallWatch } = await import('../src/games/minecraft/body/mineflayerAdapter.js');
