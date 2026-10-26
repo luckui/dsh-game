@@ -28,6 +28,7 @@ export interface WorkerController {
   follow(payload: any): Promise<unknown>;
   hudState(): unknown;
   followCam(payload: any): unknown;
+  quickAction(payload: MinecraftActionInstruction): Promise<unknown>;
   checkBlocks(payload: any): unknown;
   terrain(payload: any): unknown;
   stop(): Promise<unknown>;
@@ -92,6 +93,8 @@ async function runCommand(
       return controller.hudState();
     case 'follow-cam':
       return controller.followCam(command.payload);
+    case 'quick-action':
+      return controller.quickAction(command.payload as MinecraftActionInstruction);
     case 'check-blocks':
       return controller.checkBlocks(command.payload);
     case 'terrain':
@@ -181,6 +184,10 @@ export function createRuntimeWorkerController(
   const hasForegroundAction = (): boolean => Boolean(
     currentAction && currentAction.name !== 'follow_player',
   );
+  /** 身体自己在做的自保反应（躲苦力怕、挨打还手）：一次一个，新动作等它做完再开始 */
+  let reflex: Promise<unknown> | null = null;
+  /** 正在逃跑、躲起来：本来就在离开，自保反应不打断它 */
+  const escaping = (): boolean => hasForegroundAction() && (currentAction?.name === 'flee' || currentAction?.name === 'hide');
 
   const resumeFollowing = async (): Promise<void> => {
     if (!companion) {
@@ -334,19 +341,46 @@ export function createRuntimeWorkerController(
       }
     },
     async onCreeperClose(state) {
+      // 正在逃跑、躲起来：本来就在离开，不打断；已经在躲别的、在还手：不重复
+      if (reflex || escaping()) return;
       // 跟溺水自救一样：停下手上的事（回报给她「苦力怕靠近，身体先躲开了」），躲开，再报一声
       const actionId = hasForegroundAction() ? currentAction?.id : undefined;
-      if (actionId) {
-        await runtime.cancel(actionId, {
-          code: 'unsafe',
-          summary: 'a creeper came close, so the body stopped and backed away from it',
-          details: { reason: 'creeper', distance: Number(state.distance.toFixed(1)) },
-        });
-      } else {
-        await adapter.stopForeground();
-      }
-      const result = await adapter.evadeCreeper(new AbortController().signal);
-      emit({ kind: 'creeper-evaded', distance: state.distance, ok: result.outcome === 'succeeded' });
+      const run = (async () => {
+        if (actionId) {
+          await runtime.cancel(actionId, {
+            code: 'unsafe',
+            summary: 'a creeper came close, so the body stopped and backed away from it',
+            details: { reason: 'creeper', distance: Number(state.distance.toFixed(1)) },
+          });
+        } else {
+          await adapter.stopForeground();
+        }
+        const result = await adapter.evadeCreeper(new AbortController().signal);
+        emit({ kind: 'creeper-evaded', distance: state.distance, ok: result.outcome === 'succeeded' });
+      })();
+      reflex = run;
+      try { await run; } finally { if (reflex === run) reflex = null; }
+    },
+    async onHurtByHostile(state) {
+      // 正在逃跑、躲起来：不回头打；正在打怪：本来就在打；已经在躲苦力怕、在还手：不重复
+      if (reflex || escaping() || (hasForegroundAction() && currentAction?.name === 'attack_entity')) return;
+      const actionId = hasForegroundAction() ? currentAction?.id : undefined;
+      const interrupted = actionId ? currentAction?.name ?? null : null;
+      const run = (async () => {
+        if (actionId) {
+          await runtime.cancel(actionId, {
+            code: 'unsafe',
+            summary: `a ${state.attacker} hit her, so the body stopped to fight back`,
+            details: { reason: 'attacked', attacker: state.attacker },
+          });
+        } else {
+          await adapter.stopForeground();
+        }
+        const result = await adapter.defendAgainst(state.entityId, new AbortController().signal);
+        emit({ kind: 'fought-back', attacker: state.attacker, killed: result.outcome === 'succeeded', interrupted });
+      })();
+      reflex = run;
+      try { await run; } finally { if (reflex === run) reflex = null; }
     },
     // 苦力怕不去近战（会一起炸），交给上面的躲避反射
     shouldDefendAgainst: (entity) => entity.kind === 'hostile' && entity.name !== 'creeper',
@@ -491,6 +525,8 @@ export function createRuntimeWorkerController(
       if (hasForegroundAction()) {
         throw new Error(`Minecraft action already running: ${currentAction?.name} (${currentAction?.id})`);
       }
+      // 身体自己在躲苦力怕、在还手：等它做完再开始（两边同时设寻路目标，后开始的那个会被「目标改了」打断）
+      if (reflex) await reflex.catch(() => undefined);
       await adapter.stopForeground();
       setCurrentAction(payload);
       let result: MinecraftActionResult | undefined;
@@ -545,6 +581,9 @@ export function createRuntimeWorkerController(
     },
     followCam(payload: { reset?: boolean }) {
       return adapter.followCam(!!payload?.reset);
+    },
+    quickAction(payload: MinecraftActionInstruction) {
+      return runtime.quick(payload);
     },
     terrain(payload: { radius?: number }) {
       return adapter.terrain(payload.radius ?? 32);

@@ -100,7 +100,7 @@ function navigationFailure(
         : navigation.reason === 'interrupted'
           ? 'cancelled'
           : 'adapter_error';
-  const summary = `Could not reach ${player}: movement stopped at ${position.x}, ${position.y}, ${position.z} with ${navigation.distanceToTarget.toFixed(1)} blocks remaining.${waterText}`;
+  const summary = `Could not reach ${player}: ${navigation.message.replace(/\.$/, '')}; stopped at ${position.x}, ${position.y}, ${position.z} with ${navigation.distanceToTarget.toFixed(1)} blocks remaining.${waterText}`;
   return {
     actionId,
     outcome: code === 'cancelled' ? 'cancelled' : 'partial',

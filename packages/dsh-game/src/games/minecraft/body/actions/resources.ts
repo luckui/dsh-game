@@ -52,7 +52,8 @@ export function createResourceActions(): MinecraftActionHandler[] {
       name: 'drop_item',
       async run(instruction, context) {
         const item = stringArg(instruction.args.item, 'item');
-        const count = numberArg(instruction.args.count, 1, 1, 64);
+        // 一次可以丢好几组（背包满了清杂物）
+        const count = numberArg(instruction.args.count, 1, 1, 36 * 64);
         const player = typeof instruction.args.player === 'string' ? instruction.args.player : undefined;
         const result = await context.adapter.dropItem({ item, count, player });
         return { ...result, actionId: instruction.id };

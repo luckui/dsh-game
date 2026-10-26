@@ -25,6 +25,8 @@ export interface CollectionRequest {
   quantity: number;
   radius: number;
   signal: AbortSignal;
+  /** 这次采集里已经放弃过的位置（"x,y,z"）：后面几轮不再试 */
+  exclude?: Set<string>;
 }
 
 export interface MinecraftEntitySnapshot {
@@ -42,6 +44,8 @@ export interface MinecraftPolicyHandlers {
   /** 苦力怕贴近（4.5 格内）：同一只 4 秒内只报一次 */
   onCreeperClose?(state: { distance: number; position: { x: number; y: number; z: number } }): void | Promise<void>;
   shouldDefendAgainst(entity: MinecraftEntitySnapshot): boolean;
+  /** 挨了打、6 格内有该还手的怪：交给 worker 决定停不停手上的事、还不还手（不给就是直接还手） */
+  onHurtByHostile?(state: { attacker: string; entityId: number; distance: number }): void | Promise<void>;
 }
 
 export interface MinecraftOxygenEmergency {
@@ -106,6 +110,8 @@ export interface MinecraftBodyAdapter {
   closeStrayWindow(): Promise<void>;
   /** 苦力怕反射：躲开附近的苦力怕（跑开约 8 格） */
   evadeCreeper(signal: AbortSignal): Promise<MinecraftActionResult>;
+  /** 还手：拿上最好的武器打这只，打死或者它跑开了停（最多 20 秒），换回原来手里的 */
+  defendAgainst(entityId: number, signal: AbortSignal): Promise<MinecraftActionResult>;
   flee(signal: AbortSignal): Promise<MinecraftActionResult>;
   sleep(signal: AbortSignal): Promise<MinecraftActionResult>;
   escapeToAir(): Promise<MinecraftSafetyRecovery>;

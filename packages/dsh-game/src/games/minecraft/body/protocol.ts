@@ -11,9 +11,13 @@ export type MinecraftAction =
   | 'follow'
   | 'hud-state'
   | 'follow-cam'
+  | 'quick-action'
   | 'check-blocks'
   | 'terrain'
   | 'stop';
+
+/** 一下就完、不走路的动作：身体在做长动作时也可以同时做（quick-action） */
+export const QUICK_ACTIONS = new Set(['equip', 'drop_item', 'search_block', 'search_entity']);
 
 export type {
   MinecraftRawObservation,
@@ -84,6 +88,8 @@ export type MinecraftRuntimeEvent =
   | { kind: 'movement-blocked'; mode: 'follow'; player: string; position: { x: number; y: number; z: number }; distance: number }
   | { kind: 'oxygen-danger'; recovered: boolean; oxygen: number; method: 'surface' | 'last-breathable-position' | 'shore' | 'failed'; position: { x: number; y: number; z: number } }
   | { kind: 'creeper-evaded'; distance: number; ok: boolean }
+  /** 挨打以后身体停下手上的事还手了：打死了（killed）还是没打死；interrupted = 停下的是哪个动作 */
+  | { kind: 'fought-back'; attacker: string; killed: boolean; interrupted: string | null }
   | { kind: 'disconnected'; reason: string }
   /** 盖房子的进度（每盖完一层） */
   | { kind: 'build-progress'; text: string }

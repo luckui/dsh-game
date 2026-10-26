@@ -5,6 +5,7 @@ import type {
   MinecraftEnvironmentSnapshot,
 } from './contracts.js';
 import { createMinecraftActionRegistry } from './actions/registry.js';
+import { QUICK_ACTIONS } from './protocol.js';
 import type { MinecraftBodyAdapter } from './actions/types.js';
 
 export class MinecraftEmbodimentRuntime {
@@ -74,6 +75,33 @@ export class MinecraftEmbodimentRuntime {
       if (this.active?.id === instruction.id) this.active = undefined;
       // 动作结束（成没成都一样）还开着的界面（熔炉、箱子、工作台……）关掉：开着的时候背包的更新进的是那个界面，身体看到的背包就对不上了
       await this.options.adapter.closeStrayWindow().catch(() => {});
+    }
+  }
+
+  /**
+   * 一下就完、不走路的动作（拿东西、丢东西、找东西）：直接做，不占「正在做的动作」的位置，
+   * 正在做的长动作照常做下去（她挨打时想换剑、背包满了丢杂物，不用先停下采集）
+   */
+  async quick(instruction: MinecraftActionInstruction): Promise<MinecraftActionResult> {
+    if (!this.options.adapter.isConnected()) {
+      return failure(instruction.id, instruction.name, 'not_connected', true, this.now());
+    }
+    const handler = this.registry.get(instruction.name);
+    if (!handler || !QUICK_ACTIONS.has(instruction.name)) {
+      return failure(instruction.id, instruction.name, 'adapter_error', false, this.now(), {
+        message: `${instruction.name} cannot run alongside another action`,
+      });
+    }
+    const started = this.now();
+    try {
+      return await handler.run(instruction, {
+        adapter: this.options.adapter,
+        signal: new AbortController().signal,
+        now: this.now,
+        snapshot: () => this.snapshot(),
+      });
+    } catch (error) {
+      return failure(instruction.id, instruction.name, 'adapter_error', true, started, { message: error instanceof Error ? error.message : String(error) });
     }
   }
 

@@ -671,7 +671,7 @@ export function createMineflayerAdapter(
         });
       }
       notifyFoodState(current, policyHandlers);
-      if (current.health < lastHealth) defendFromNearbyHostile(current, policyHandlers);
+      if (current.health < lastHealth) defendFromNearbyHostile(current, policyHandlers, emit);
       lastHealth = current.health;
     });
     current.on('death', () => {
@@ -765,6 +765,8 @@ export function createMineflayerAdapter(
     byName: Record<string, number>;
     skipped?: number;
     missingTool?: number;
+    /** 没采到的那几块：位置和原因（给她看） */
+    failures?: string[];
   }> {
     const current = requireBot(bot);
     const ids = new Map<string, number>();
@@ -796,10 +798,15 @@ export function createMineflayerAdapter(
         count: Math.min(64, Math.max(16, request.quantity * 4)),
       }) ?? []));
     }
+    // 近的先挖；比她头顶高出两格以上的往后排（要垫方块爬上去，直播里挑过头顶 9 格的一块站了一分多钟）
+    const reachCost = (block: any) => {
+      const above = block.position.y - current.entity.position.y - 2;
+      return distanceToBot(current, block.position) + (above > 0 ? above * 4 : 0);
+    };
     const blocks = positions
       .map((position: any) => current.blockAt(position))
-      .filter((block: any) => block && idSet.has(block.type))
-      .sort((left: any, right: any) => distanceToBot(current, left.position) - distanceToBot(current, right.position))
+      .filter((block: any) => block && idSet.has(block.type) && !request.exclude?.has(`${block.position.x},${block.position.y},${block.position.z}`))
+      .sort((left: any, right: any) => reachCost(left) - reachCost(right))
       .slice(0, request.quantity);
     if (blocks.length === 0) return { total: 0, byName: {} };
 
@@ -808,6 +815,7 @@ export function createMineflayerAdapter(
     let total = 0;
     let skipped = 0;
     let missingTool = 0;
+    const failures: string[] = [];
     const byName: Record<string, number> = {};
     for (const candidate of blocks) {
       if (request.signal.aborted) throw abortError();
@@ -828,6 +836,12 @@ export function createMineflayerAdapter(
       });
       try {
         await collectSingleBlock(current, candidate, request.signal);
+        // 挖完核对：方块还在原地就不算（挖到一半被打断，collectblock 照样当挖完了）
+        const still = current.blockAt(candidate.position);
+        if (still && still.type === candidate.type) {
+          const away = distanceToBot(current, candidate.position);
+          throw new Error(away > 5 ? `never got within reach (still ${away.toFixed(0)} blocks away)` : 'dug at it but the block is still there');
+        }
         total += 1;
         const name = nameById.get(candidate.type) ?? candidate.name;
         byName[name] = (byName[name] ?? 0) + 1;
@@ -839,6 +853,9 @@ export function createMineflayerAdapter(
       } catch (error) {
         if (request.signal.aborted) throw abortError();
         skipped += 1;
+        const where = `${candidate.position.x},${candidate.position.y},${candidate.position.z}`;
+        request.exclude?.add(where);
+        failures.push(`${candidate.name} at ${where.replace(/,/g, ' ')}: ${error instanceof Error ? error.message : String(error)}`);
         emit({
           kind: 'log',
           level: 'warn',
@@ -846,7 +863,7 @@ export function createMineflayerAdapter(
         });
       }
     }
-    return { total, byName, skipped, missingTool };
+    return { total, byName, skipped, missingTool, failures };
   }
 
   /** 走到够得着的地方，换上合适的工具，挖掉这一格；盖房子时草、雪这类能直接放东西的不挖（skipReplaceable） */
@@ -950,12 +967,19 @@ export function createMineflayerAdapter(
       }
     }
 
+    // 背包满了：挖下来的东西捡不起来（collectblock 会去找箱子放，报「没有箱子」）；直接说，列出占地方最多的几样
+    const fullText = inventoryFullText(current, targetItem);
+    if (fullText) return actionFailure('', fullText, 'inventory_full');
+
     const started = Date.now();
     const before = inventoryCounts(current);
 
     let brokenTotal = 0;
+    let filledUp = false;
     const brokenByName: Record<string, number> = {};
     let skippedTotal = 0;
+    const exclude = new Set<string>();
+    const failures: string[] = [];
     let missingToolTotal = 0;
     let observedTargetCount = before[targetItem] ?? 0;
     let sweepNumber = 0;
@@ -974,9 +998,11 @@ export function createMineflayerAdapter(
           quantity: chancy ? quantity * 8 : quantity,
           radius,
           signal: options.signal,
+          exclude,
         });
         brokenTotal += swept.total;
         skippedTotal += swept.skipped ?? 0;
+        failures.push(...(swept.failures ?? []));
         missingToolTotal += swept.missingTool ?? 0;
         for (const [name, count] of Object.entries(swept.byName)) {
           brokenByName[name] = (brokenByName[name] ?? 0) + count;
@@ -992,10 +1018,12 @@ export function createMineflayerAdapter(
           level: 'info',
           message: `[${options.actionId}] collect_item sweep=${sweepNumber} radius=${radius} requested=${quantity} broken=${brokenTotal} ${targetItem}=${gainedTotal}/${options.maxCount}`,
         });
+        // 挖着挖着背包满了：停下，后面说清楚
+        filledUp = !!inventoryFullText(current, targetItem);
         return {
           collectedBlocks: swept.total,
           gainedItems: gainedThisSweep,
-          stop: (swept.missingTool ?? 0) > 0,
+          stop: (swept.missingTool ?? 0) > 0 || filledUp,
         };
       },
     });
@@ -1011,7 +1039,9 @@ export function createMineflayerAdapter(
       name,
       count,
     }));
-    const skippedText = skippedTotal > 0 ? `（另有 ${skippedTotal} 块存在但无法到达）` : '';
+    const skippedText = skippedTotal > 0
+      ? `; could not mine ${skippedTotal} of them: ${failures.slice(0, 5).join('; ')}${failures.length > 5 ? '; …' : ''}`
+      : '';
     const missingToolText = missingToolTotal > 0
       ? `；另有 ${missingToolTotal} 块因缺少可开采工具无法采集，请先用 craft_item 制作所需工具（如 stone_pickaxe）再重试`
       : '';
@@ -1032,6 +1062,18 @@ export function createMineflayerAdapter(
         text: `缺少可开采工具：${missingToolTotal} 块因无合适工具未采集，请先用 craft_item 制作所需工具（如 stone_pickaxe）再重试。`,
         data: { missingTool: missingToolTotal },
       });
+    }
+    if (!reached && filledUp) {
+      return {
+        actionId: '',
+        outcome: 'partial',
+        summary: `collected ${gained}/${options.maxCount} ${targetItem}, then ${inventoryFullText(current, targetItem)}`,
+        durationMs: Date.now() - started,
+        inventoryDelta: inventoryDifference(before, after),
+        worldChanges,
+        observations,
+        error: { code: 'inventory_full', recoverable: true, details: {} },
+      };
     }
     return {
       actionId: '',
@@ -2264,8 +2306,11 @@ export function createMineflayerAdapter(
       (entry: any) => normalizeMinecraftLookupName(entry.name) === itemName,
     );
     if (!item) return craftFailure('missing_item', `no ${options.item} in inventory to drop`, started);
-    const count = Math.max(1, Math.min(Math.trunc(options.count) || 1, item.count ?? 1));
-    const playerName = options.player?.trim() || owner;
+    // 数量按背包里这种东西的总数算（不止第一组）：背包满了一次丢掉几组杂物
+    const total = current.inventory.items().filter((entry: any) => entry.type === item.type).reduce((sum: number, entry: any) => sum + entry.count, 0);
+    const count = Math.max(1, Math.min(Math.trunc(options.count) || 1, total));
+    // 只有说了给谁才走过去；丢杂物就地丢（以前不说也走到主人身边）
+    const playerName = options.player?.trim();
     if (playerName) {
       const player: any = Object.values(current.players ?? {}).find(
         (entry: any) => entry.username === playerName,
@@ -2281,14 +2326,23 @@ export function createMineflayerAdapter(
         }
       }
     }
-    await current.toss(item.type, item.metadata, count);
+    // mineflayer 的 toss 一次只丢一组里的：一组一组丢，丢够为止
+    let left = count;
+    while (left > 0) {
+      const stack = current.inventory.items().find((entry: any) => entry.type === item.type);
+      if (!stack) break;
+      const n = Math.min(left, stack.count);
+      if (n === stack.count) await current.tossStack(stack);
+      else await current.toss(stack.type, stack.metadata, n);
+      left -= n;
+    }
     const where = playerName ? `near ${playerName}` : 'at current position';
     return {
       actionId: '',
       outcome: 'succeeded',
-      summary: `dropped ${count} ${item.name} ${where}`,
+      summary: `dropped ${count - left} ${item.name} ${where}`,
       durationMs: Date.now() - started,
-      inventoryDelta: { [item.name]: -count },
+      inventoryDelta: { [item.name]: -(count - left) },
       worldChanges: [],
       observations: [],
     };
@@ -2610,6 +2664,40 @@ export function createMineflayerAdapter(
       return fleeFromHostiles(current, signal, 10, (e: any) => e?.name === 'creeper', 5);
     },
 
+    async defendAgainst(entityId, signal) {
+      const current = requireBot(bot);
+      const started = Date.now();
+      const entity = current.entities?.[entityId];
+      if (!entity) return actionFailure('defend', 'the attacker is gone', 'target_not_found');
+      const heldBefore: string | null = current.heldItem?.name ?? null;
+      const weapon = await equipBestWeapon(current).catch(() => null);
+      let killed = false;
+      try {
+        await current.pvp?.attack?.(entity);
+        // 打死、跑开 12 格外、或者 20 秒：停
+        for (let t = 0; t < 80 && !signal.aborted; t++) {
+          if (!current.entities?.[entityId]) { killed = true; break; }
+          if (entity.position.distanceTo(current.entity.position) > 12) break;
+          await delay(250, signal).catch(() => undefined);
+        }
+      } finally {
+        await current.pvp?.stop?.();
+        if (weapon && heldBefore && heldBefore !== weapon) {
+          const back = current.inventory?.items?.().find((i: any) => i.name === heldBefore);
+          if (back) await current.equip(back, 'hand').catch(() => {});
+        }
+      }
+      return {
+        actionId: '',
+        outcome: killed ? 'succeeded' : 'partial',
+        summary: killed ? `killed the ${entity.name}` : `fought the ${entity.name} but it is not dead`,
+        durationMs: Date.now() - started,
+        inventoryDelta: {},
+        worldChanges: [],
+        observations: [],
+      };
+    },
+
     flee(signal) {
       return fleeFromHostiles(requireBot(bot), signal);
     },
@@ -2844,83 +2932,94 @@ export function createMineflayerAdapter(
         message: `[${options.actionId}] combat: ${message}`,
       });
 
-      if (options.kill && current.pvp?.attack) {
-        while (confirmed < options.quantity) {
-          throwIfAborted(options.signal);
-          let entity = matchingEntities(current, options.entity, options.radius)
-            .find((candidate: any) => !processedTargets.has(entityKey(candidate)));
-          if (!entity) {
-            const fallback = matchingEntities(current, options.entity, COMBAT_CHASE_RADIUS)
+      // 先拿上最好的武器（挖矿换成镐子、封顶换成方块以后，手里常常不是剑）；打完换回原来手里的
+      const heldBefore: string | null = current.heldItem?.name ?? null;
+      const weapon = await equipBestWeapon(current);
+      if (weapon) report('info', `holding ${weapon}${heldBefore && heldBefore !== weapon ? ` (was ${heldBefore})` : ''}`);
+      try {
+        if (options.kill && current.pvp?.attack) {
+          while (confirmed < options.quantity) {
+            throwIfAborted(options.signal);
+            let entity = matchingEntities(current, options.entity, options.radius)
               .find((candidate: any) => !processedTargets.has(entityKey(candidate)));
-            if (fallback) {
-              report('warn', `no ${options.entity} within ${options.radius} blocks; chasing nearest at ${distanceToBot(current, fallback.position).toFixed(1)}`);
-              entity = fallback;
+            if (!entity) {
+              const fallback = matchingEntities(current, options.entity, COMBAT_CHASE_RADIUS)
+                .find((candidate: any) => !processedTargets.has(entityKey(candidate)));
+              if (fallback) {
+                report('warn', `no ${options.entity} within ${options.radius} blocks; chasing nearest at ${distanceToBot(current, fallback.position).toFixed(1)}`);
+                entity = fallback;
+              }
             }
+            if (!entity) {
+              report('warn', `no remaining ${options.entity} within ${options.radius} blocks (${confirmed}/${options.quantity} confirmed)`);
+              break;
+            }
+            processedTargets.add(entityKey(entity));
+            attacked += 1;
+            report('info', `target ${attacked}: ${options.entity}#${entity.id ?? 'unknown'} at distance ${distanceToBot(current, entity.position).toFixed(1)}`);
+            await current.pvp.attack(entity);
+            const killed = await (dependencies.confirmEntityDeath ?? confirmEntityDeath)(
+              current,
+              entity,
+              30_000,
+              options.signal,
+            );
+            await current.pvp.stop?.();
+            if (killed) {
+              confirmed += 1;
+              if (entity.position) killedAt.push(entity.position.clone());
+              report('info', `confirmed ${options.entity}#${entity.id ?? 'unknown'} dead (${confirmed}/${options.quantity})`);
+              continue;
+            }
+            report('warn', `could not confirm ${options.entity}#${entity.id ?? 'unknown'} dead; excluding target`);
+            observations.push({
+              id: `combat.unconfirmed.${entity.id ?? attacked}`,
+              at: Date.now(),
+              severity: 'warning',
+              kind: 'combat.target-unconfirmed',
+              text: `Could not confirm ${options.entity} target ${entity.id ?? attacked} was defeated`,
+              data: { entity: options.entity, entityId: entity.id },
+            });
           }
-          if (!entity) {
-            report('warn', `no remaining ${options.entity} within ${options.radius} blocks (${confirmed}/${options.quantity} confirmed)`);
-            break;
-          }
-          processedTargets.add(entityKey(entity));
-          attacked += 1;
-          report('info', `target ${attacked}: ${options.entity}#${entity.id ?? 'unknown'} at distance ${distanceToBot(current, entity.position).toFixed(1)}`);
-          await current.pvp.attack(entity);
-          const killed = await (dependencies.confirmEntityDeath ?? confirmEntityDeath)(
-            current,
-            entity,
-            30_000,
-            options.signal,
-          );
-          await current.pvp.stop?.();
-          if (killed) {
-            confirmed += 1;
-            if (entity.position) killedAt.push(entity.position.clone());
-            report('info', `confirmed ${options.entity}#${entity.id ?? 'unknown'} dead (${confirmed}/${options.quantity})`);
-            continue;
-          }
-          report('warn', `could not confirm ${options.entity}#${entity.id ?? 'unknown'} dead; excluding target`);
-          observations.push({
-            id: `combat.unconfirmed.${entity.id ?? attacked}`,
-            at: Date.now(),
-            severity: 'warning',
-            kind: 'combat.target-unconfirmed',
-            text: `Could not confirm ${options.entity} target ${entity.id ?? attacked} was defeated`,
-            data: { entity: options.entity, entityId: entity.id },
-          });
+        } else {
+          const entity = nearestMatchingEntity(current, options.entity, options.radius);
+          if (!entity) return actionFailure('attack_entity', `no ${options.entity} found within ${options.radius} blocks`, 'target_not_found');
+          await current.attack?.(entity);
+          attacked = 1;
         }
-      } else {
-        const entity = nearestMatchingEntity(current, options.entity, options.radius);
-        if (!entity) return actionFailure('attack_entity', `no ${options.entity} found within ${options.radius} blocks`, 'target_not_found');
-        await current.attack?.(entity);
-        attacked = 1;
-      }
 
-      throwIfAborted(options.signal);
-      report('info', `collecting drops after ${confirmed} confirmed kills`);
-      // 生物死了要播完倒下的动画（约 1 秒）才掉东西：等它掉出来再去捡，不然最后一只的掉落物会被落下
-      if (confirmed > 0) await delay(1200, options.signal);
-      let pickedDrops = await (dependencies.collectDrops ?? collectNearbyDrops)(current, 16, options.signal);
-      // 离得远的死亡地点（追后面那只跑远了）：走回去再捡一次
-      for (const spot of killedAt) {
-        if (current.entity.position.distanceTo(spot) <= 8) continue;
-        const r = await patchedGoto(current, new goals.GoalNear(spot.x, spot.y, spot.z, 2), { signal: options.signal });
-        if (r.ok) pickedDrops += await (dependencies.collectDrops ?? collectNearbyDrops)(current, 8, options.signal);
+        throwIfAborted(options.signal);
+        report('info', `collecting drops after ${confirmed} confirmed kills`);
+        // 生物死了要播完倒下的动画（约 1 秒）才掉东西：等它掉出来再去捡，不然最后一只的掉落物会被落下
+        if (confirmed > 0) await delay(1200, options.signal);
+        let pickedDrops = await (dependencies.collectDrops ?? collectNearbyDrops)(current, 16, options.signal);
+        // 离得远的死亡地点（追后面那只跑远了）：走回去再捡一次
+        for (const spot of killedAt) {
+          if (current.entity.position.distanceTo(spot) <= 8) continue;
+          const r = await patchedGoto(current, new goals.GoalNear(spot.x, spot.y, spot.z, 2), { signal: options.signal });
+          if (r.ok) pickedDrops += await (dependencies.collectDrops ?? collectNearbyDrops)(current, 8, options.signal);
+        }
+        const inventoryDelta = inventoryDifference(before, inventoryCounts(current));
+        const complete = options.kill ? confirmed >= options.quantity : attacked > 0;
+        return {
+          actionId: '',
+          outcome: complete ? 'succeeded' : 'partial',
+          summary: options.kill
+            ? `killed ${confirmed}/${options.quantity} ${options.entity}; picked up ${pickedDrops} drops`
+            : `attacked ${options.entity}`,
+          durationMs: Date.now() - started,
+          inventoryDelta,
+          worldChanges: confirmed > 0 || attacked > 0
+            ? [{ kind: 'entity_hit', name: options.entity, count: options.kill ? confirmed : attacked }]
+            : [],
+          observations,
+        };
+      } finally {
+        if (weapon && heldBefore && heldBefore !== weapon) {
+          const back = current.inventory?.items?.().find((i: any) => i.name === heldBefore);
+          if (back) await current.equip(back, 'hand').catch(() => {});
+        }
       }
-      const inventoryDelta = inventoryDifference(before, inventoryCounts(current));
-      const complete = options.kill ? confirmed >= options.quantity : attacked > 0;
-      return {
-        actionId: '',
-        outcome: complete ? 'succeeded' : 'partial',
-        summary: options.kill
-          ? `killed ${confirmed}/${options.quantity} ${options.entity}; picked up ${pickedDrops} drops`
-          : `attacked ${options.entity}`,
-        durationMs: Date.now() - started,
-        inventoryDelta,
-        worldChanges: confirmed > 0 || attacked > 0
-          ? [{ kind: 'entity_hit', name: options.entity, count: options.kill ? confirmed : attacked }]
-          : [],
-        observations,
-      };
     },
 
     async startFollowing(player) {
@@ -3174,6 +3273,45 @@ function immediateNavigationResult(current: any, target: any, message: string): 
 
 // equip 自动判断落点：盔甲按部位穿到对应护甲槽，其余物品切换手持。
 // 规则基于物品名后缀，跨版本通用（不依赖具体版本的物品注册表）。
+/**
+ * 背包满了吗（36 格都占了，也没有一格同种东西还能叠上去）：满了返回给她看的说明（占地方最多的几样、怎么丢），没满返回 null。
+ * 要采的东西掉出来是别的（diamond_ore 掉 diamond）：item 填掉出来的那个
+ */
+function inventoryFullText(bot: any, item: string): string | null {
+  const inventory = bot.inventory;
+  if (!inventory) return null;
+  const empty = typeof inventory.emptySlotCount === 'function' ? inventory.emptySlotCount() : 36 - (inventory.items?.().length ?? 0);
+  if (empty > 0) return null;
+  const items: any[] = inventory.items?.() ?? [];
+  if (items.some((i) => i.name === item && i.count < (i.stackSize ?? 64))) return null;
+  const totals = new Map<string, { count: number; slots: number }>();
+  for (const i of items) {
+    if (i.maxDurability) continue; // 工具、武器、盔甲不算杂物
+    const t = totals.get(i.name) ?? { count: 0, slots: 0 };
+    t.count += i.count;
+    t.slots += 1;
+    totals.set(i.name, t);
+  }
+  const biggest = [...totals.entries()].sort((a, b) => b[1].slots - a[1].slots || b[1].count - a[1].count).slice(0, 5);
+  const list = biggest.map(([name, t]) => `${name} ×${t.count} (${t.slots} slots)`).join(', ');
+  return `the inventory is full (all 36 slots used), so nothing new can be picked up. Taking the most room: ${list}. Throw away what you do not need with drop (e.g. drop ${biggest[0]?.[0] ?? 'cobblestone'} 64), then try again`;
+}
+
+/** 打怪用的武器，好的在前：剑比斧子出手快，先挑剑；没有剑才用斧子 */
+const WEAPONS = [
+  'netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'golden_sword', 'wooden_sword',
+  'netherite_axe', 'diamond_axe', 'iron_axe', 'stone_axe', 'golden_axe', 'wooden_axe', 'trident',
+];
+
+/** 背包里最好的武器拿到手上（已经拿着就不换）；没有武器返回 null */
+async function equipBestWeapon(bot: any): Promise<string | null> {
+  const items: any[] = bot.inventory?.items?.() ?? [];
+  const best = WEAPONS.map((name) => items.find((i) => i.name === name)).find(Boolean);
+  if (!best) return null;
+  if (bot.heldItem?.name !== best.name) await bot.equip(best, 'hand');
+  return best.name;
+}
+
 function equipDestinationFor(itemName: string): 'hand' | 'head' | 'torso' | 'legs' | 'feet' {
   const name = normalizeMinecraftLookupName(itemName);
   if (name.endsWith('_helmet') || name === 'pumpkin' || name === 'carved_pumpkin') return 'head';
@@ -3873,11 +4011,41 @@ async function collectSingleBlock(current: any, block: any, signal?: AbortSignal
     return;
   }
   const task = current.collectBlock.collect(block, { ignoreNoPath: true });
-  await runAbortableOperation(
-    task,
-    signal,
-    () => current.collectBlock?.cancelTask?.(),
-  );
+  // 15 秒没更靠近它、也没在挖它：放弃这一块（寻路器原地重试可以一直重试下去，一两分钟一步没挪也不报错）
+  const watch = stallWatch(current, block.position, 15_000, () => current.collectBlock?.cancelTask?.());
+  try {
+    await Promise.race([
+      runAbortableOperation(task, signal, () => current.collectBlock?.cancelTask?.()),
+      watch.stalled,
+    ]);
+  } finally {
+    watch.stop();
+  }
+}
+
+/** 一直盯着她离 target 多远：ms 毫秒里没近过半格、也没在挖东西，就调 onStall，stalled 报错说卡在哪 */
+export function stallWatch(bot: any, target: Vec3, ms: number, onStall: () => void): { stalled: Promise<never>; stop: () => void } {
+  const center = new Vec3(target.x + 0.5, target.y + 0.5, target.z + 0.5);
+  let best = Number.POSITIVE_INFINITY;
+  let last = Date.now();
+  let fail: (error: Error) => void = () => {};
+  const stalled = new Promise<never>((_, reject) => { fail = reject; });
+  stalled.catch(() => {});
+  const timer = setInterval(() => {
+    const here = bot.entity?.position;
+    if (!here) return;
+    const d = here.distanceTo(center);
+    if (d < best - 0.5 || bot.targetDigBlock) {
+      best = Math.min(best, d);
+      last = Date.now();
+    }
+    if (Date.now() - last < ms) return;
+    clearInterval(timer);
+    // 先报原因、再取消：取消以后 collectblock 的任务会正常结束，晚一步的话原因就被它盖掉了
+    fail(new Error(`no progress toward it for ${Math.round(ms / 1000)} s (stuck at ${Math.floor(here.x)} ${Math.floor(here.y)} ${Math.floor(here.z)}, still ${d.toFixed(0)} blocks away)`));
+    onStall();
+  }, 500);
+  return { stalled, stop: () => clearInterval(timer) };
 }
 
 function canHarvestWithInventory(current: any, block: any): boolean {
@@ -3999,7 +4167,11 @@ function notifyFoodState(bot: any, handlers: MinecraftPolicyHandlers): void {
   handlers.onFoodState({ food: bot.food, hasInventoryFood });
 }
 
-function defendFromNearbyHostile(bot: any, handlers: MinecraftPolicyHandlers): void {
+/**
+ * 挨了打：6 格内有该还手的怪，交给 worker（它知道身体正在做什么：逃跑、躲起来时不还手；别的事先停下再还手）。
+ * 以前这里直接 pvp.attack：不管身体在做什么都把寻路目标换成追着怪打，逃跑被拐回去打架、采集的寻路被抢走，手里拿着什么就用什么打
+ */
+function defendFromNearbyHostile(bot: any, handlers: MinecraftPolicyHandlers, emit: (event: any) => void): void {
   const entity = bot.nearestEntity?.((candidate: any) => {
     const snapshot = classifyEntity(candidate);
     return (
@@ -4007,7 +4179,13 @@ function defendFromNearbyHostile(bot: any, handlers: MinecraftPolicyHandlers): v
       candidate.position?.distanceTo(bot.entity.position) <= 6
     );
   });
-  if (entity) void bot.pvp?.attack?.(entity);
+  if (!entity) return;
+  if (!handlers.onHurtByHostile) {
+    void bot.pvp?.attack?.(entity);
+    return;
+  }
+  Promise.resolve(handlers.onHurtByHostile({ attacker: entity.name ?? 'mob', entityId: entity.id, distance: entity.position.distanceTo(bot.entity.position) }))
+    .catch((error) => emit({ kind: 'log', level: 'error', message: `[survival] fight-back handler failed: ${error instanceof Error ? error.message : String(error)}` }));
 }
 
 function classifyEntity(entity: any): MinecraftEntitySnapshot {

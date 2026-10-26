@@ -50,21 +50,23 @@ const solid = (b: any) => !!b && b.boundingBox === 'block';
 const inNether = (bot: any) => String(bot.game?.dimension ?? '').includes('nether');
 
 const SEE_THROUGH = new Set(['air', 'cave_air', 'void_air', 'water']);
+/** 挡视线时可以随手挖掉的：杂草、雪层（庄稼、火把、花不在里面） */
+const WEEDS = new Set(['short_grass', 'grass', 'tall_grass', 'fern', 'large_fern', 'dead_bush', 'snow']);
 
-/** 从她眼睛到 aim 的视线上，除了 allowed 这几格，有没有不是空气的东西（庄稼、草这类没碰撞箱的也算） */
-function lineClear(bot: any, aim: Vec3, allowed: Vec3[]): boolean {
-  const eye = bot.entity.position.offset(0, bot.entity.eyeHeight ?? 1.62, 0);
+/** 从 eye 看 aim，除了 allowed 这几格，视线上第一个不是空气的方块（庄稼、草这类没碰撞箱的也算）；没有就是 null */
+function blockerOnLine(bot: any, eye: Vec3, aim: Vec3, allowed: Vec3[], ignoreWeeds = false): any | null {
   const d = aim.minus(eye);
   const len = d.norm();
-  const skip = new Set(allowed.map(fmt));
+  // 她自己站着的两格（脚、头）里的东西不算：服务器的视线从她眼睛出发，不会被她身子所在那格里的传送门、矮庄稼挡住
+  const skip = new Set([...allowed, eye.floored(), eye.offset(0, -1, 0).floored()].map(fmt));
   for (let t = 0; t < len; t += 0.05) {
     const p = eye.plus(d.scaled(t / len)).floored();
     if (skip.has(fmt(p))) continue;
-    const name = bot.blockAt(p)?.name;
+    const block = bot.blockAt(p);
     // 水挡不住：倒水时服务器的视线穿过液体
-    if (name && !SEE_THROUGH.has(name)) return false;
+    if (block && !SEE_THROUGH.has(block.name) && !(ignoreWeeds && WEEDS.has(block.name))) return block;
   }
-  return true;
+  return null;
 }
 
 /** 走到够得着的地方（4 格内，看得到那一格） */
@@ -125,14 +127,46 @@ export async function useBucket(bot: any, req: { item: string; position: { x: nu
     const faces = Object.entries(SIDES).map(([, d]) => ({ against: target.minus(d), d })).filter((f) => solid(bot.blockAt(f.against)));
     if (!faces.length) return result(started, before, bot, 'failed', `nothing solid next to ${fmt(target)} to pour against`, 'blocked');
     const aimOf = (f: { against: Vec3; d: Vec3 }) => f.against.offset(0.5 + f.d.x * 0.5, 0.5 + f.d.y * 0.5, 0.5 + f.d.z * 0.5);
-    // 视线上不能有别的东西：服务器按她的视线找倒在哪，庄稼、草、火把没有碰撞箱但挡视线，水会倒进那一格（冲掉庄稼）。
-    // 哪个面都被挡着：走到那一格旁边再挑一次
-    let face = faces.find((f) => lineClear(bot, aimOf(f), [target, f.against]));
-    if (!face) {
-      const r = await patchedGoto(bot, new goals.GoalNear(target.x, target.y + 1, target.z, 1), { signal: req.signal });
-      if (r.ok) face = faces.find((f) => lineClear(bot, aimOf(f), [target, f.against]));
+    // 视线上不能有别的东西：服务器按她的视线找倒在哪，庄稼、草、火把没有碰撞箱但挡视线，水会倒进那一格（冲掉庄稼）
+    const eyeAt = (feet: Vec3) => feet.offset(0, bot.entity.eyeHeight ?? 1.62, 0);
+    const pick = (eye: Vec3, ignoreWeeds = false) => {
+      let blocker: any = null;
+      for (const f of faces) {
+        const b = blockerOnLine(bot, eye, aimOf(f), [target, f.against], ignoreWeeds);
+        if (!b) return { face: f, blocker: null };
+        blocker ??= b;
+      }
+      return { face: null, blocker };
+    };
+    let choice = pick(eyeAt(bot.entity.position));
+    // 挡着的是杂草、雪层：挖掉（一碰就掉，玩家也这么做）；庄稼、火把、花不挖
+    const clearWeeds = async () => {
+      for (let i = 0; i < 3 && !choice.face && choice.blocker && WEEDS.has(choice.blocker.name); i++) {
+        await bot.dig(choice.blocker, true).catch(() => {});
+        choice = pick(eyeAt(bot.entity.position));
+      }
+    };
+    await clearWeeds();
+    // 还是挡着：在那一格周围找一个站的地方（脚下实心、身子两格空着），从那里看进去视线通的（杂草不算，到了再挖），走过去
+    if (!choice.face) {
+      const spots = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1], [2, 0], [-2, 0], [0, 2], [0, -2]];
+      for (const [dx, dz] of spots) {
+        const stand = target.offset(dx, 1, dz);
+        if (!solid(bot.blockAt(stand.offset(0, -1, 0))) || solid(bot.blockAt(stand)) || solid(bot.blockAt(stand.offset(0, 1, 0)))) continue;
+        if (!pick(eyeAt(stand.offset(0.5, 0, 0.5)), true).face) continue;
+        const r = await patchedGoto(bot, new goals.GoalBlock(stand.x, stand.y, stand.z), { signal: req.signal });
+        if (r.ok) {
+          choice = pick(eyeAt(bot.entity.position));
+          await clearWeeds();
+        }
+        if (choice.face) break;
+      }
     }
-    if (!face) return result(started, before, bot, 'failed', `could not get a clear line of sight into ${fmt(target)} (something like a crop or a torch is in the way)`, 'blocked');
+    const face = choice.face;
+    if (!face) {
+      const what = choice.blocker ? `${choice.blocker.name} at ${fmt(choice.blocker.position)} is in the way` : 'something is in the way';
+      return result(started, before, bot, 'failed', `could not get a clear line of sight into ${fmt(target)} (${what})`, 'blocked');
+    }
     await bot.lookAt(aimOf(face), true);
     await sleep(100);
     bot.activateItem();

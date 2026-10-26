@@ -15,6 +15,7 @@ import type { GameAction, GameActionSpec, GameSession, LiveSource, Moment, RunEv
 import type { MinecraftActionResult, MinecraftEnvironmentSnapshot, MinecraftHudState, MinecraftObservedEntity } from './body/contracts.js';
 import type { MinecraftRuntimeEvent, MinecraftStatus } from './body/protocol.js';
 import { MinecraftRuntimeManager } from './body/runtimeManager.js';
+import { QUICK_ACTIONS } from './body/protocol.js';
 import { RconLink, rcon, rconBatch, type RconTarget } from './rcon.js';
 import type { FollowPose } from './body/followCam.js';
 import { CameraClient, findJava, findMinecraftRoot } from './camera.js';
@@ -76,7 +77,15 @@ interface Running {
   meta?: JournalMeta;
   /** 不是身体做、是这里自己做的（创造模式一层层放）：停下用它 */
   abort?: AbortController;
+  /** 交给身体的动作和参数（被自保的事打断以后接着做用） */
+  bodyAction?: string;
+  args?: Record<string, unknown>;
 }
+
+/** 自保的事：不排队，先停下手上的 */
+const URGENT = new Set(['attack', 'flee', 'hide']);
+/** 被打断以后可以原样再做一遍的（再做一遍不会多做一份）；采集只补剩下的数量 */
+const RESUMABLE = new Set(['collect_item', 'go_to', 'navigate_to_player', 'dig_at', 'build_structure', 'pickup_drops', 'harvest_crops', 'farm_plot']);
 
 const POLL_MS = 2000;
 /** 摄像机窗口上的 HUD 多久刷新一次 */
@@ -89,15 +98,15 @@ const ACTIONS: GameActionSpec[] = [
   { action: 'collect', description: '采集一种东西：自己找、走过去、挖、捡起来，直到背包里多了这么多（后台做）。各种原木（oak_log、spruce_log……）算同一种，砍的是最近的树；木板、木棍、工作台用哪种木头都行', params:{ name: '物品的英文 id，比如 oak_log、cobblestone、iron_ore', index: '数量（默认 1）' } },
   { action: 'craft', description: '合成（需要工作台的会自己找或放一个；缺的中间材料会先合成）（后台做）', params: { name: '物品的英文 id，比如 crafting_table、wooden_pickaxe、torch', index: '数量（默认 1）' } },
   { action: 'smelt', description: '用熔炉烧东西（后台做）', params: { name: '要得到的东西的英文 id，比如 iron_ingot、cooked_beef', index: '数量（默认 1）' } },
-  { action: 'go', description: '走到一个坐标（后台做）', params: { text: '坐标「x y z」' } },
+  { action: 'go', description: '走到一个坐标（后台做）：路上挡着的方块会挖开，所以在地下也能直接 go 到几十格外的坐标，身体一路挖过去（40 格石头约 15 秒）；走不到会说停在哪、还差几格、为什么', params: { text: '坐标「x y z」' } },
   { action: 'go_to_player', description: '走到一个玩家身边（后台做）', params: { name: '玩家名' } },
   { action: 'follow', description: '一直跟着一个玩家走，直到你做别的事或 stop', params: { name: '玩家名' } },
-  { action: 'attack', description: '去打附近的生物（后台做）', params: { name: '生物的英文 id，比如 zombie、cow', index: '打几只（默认 1）' } },
+  { action: 'attack', description: '去打附近的生物（后台做）：先拿上背包里最好的武器，打完换回原来手里的。打怪、逃跑、躲起来不排队：身体手上的事先停下，做完再接着做（采集、走路、挖、盖房子这类接着做；合成、烧东西不接着做，免得多做一份）', params: { name: '生物的英文 id，比如 zombie、cow', index: '打几只（默认 1）' } },
   { action: 'place', description: '在一个坐标放一个方块', params: { name: '方块的英文 id', text: '坐标「x y z」' } },
   { action: 'look', description: '看看周围的地形：一张以你为中心 65×65 格的俯视图（地面方块的颜色，水是蓝的，越亮越高），加上水占多少、地面多高、附近哪里有平地（中心坐标、大小）。找地方盖房子、找路之前先看一眼' },
-  { action: 'find', description: '找附近的某种方块或生物在哪（马上返回位置）', params: { name: '方块或生物的英文 id' } },
-  { action: 'equip', description: '拿在手上，或者穿上盔甲', params: { name: '物品的英文 id' } },
-  { action: 'drop', description: '把东西丢在地上（给别的玩家）', params: { name: '物品的英文 id', index: '数量（默认 1）' } },
+  { action: 'find', description: '找附近的某种方块或生物在哪：马上返回每一处的坐标和离你多远（身体在做别的事时也能找）', params: { name: '方块或生物的英文 id' } },
+  { action: 'equip', description: '拿在手上，或者穿上盔甲（身体在做别的事时也能马上换）', params: { name: '物品的英文 id' } },
+  { action: 'drop', description: '把东西丢在脚边的地上（背包满了丢杂物，或者给旁边的玩家）', params: { name: '物品的英文 id', index: '数量（默认 1；可以超过一组，比如 448）' } },
   { action: 'pickup', description: '捡起附近地上的掉落物（后台做）' },
   { action: 'hide', description: '原地往下挖三格钻进去、用一块方块（泥土、圆石、木板……）封住头顶，躲怪过夜；出来时 go 回原来的坐标（后台做）' },
   { action: 'flee', description: '朝远离附近怪物的方向跑开十几格（后台做）' },
@@ -162,6 +171,8 @@ export class MinecraftSession implements GameSession {
   /** 排着队等身体做的长动作（她一次下了好几个，按顺序做） */
   private queue: { bodyAction: string; args: Record<string, unknown>; label: string; meta?: JournalMeta }[] = [];
   private goal = '';
+  /** 她什么时候写下的目标（上一局留下的是 null）：目标是她的原话，里面写的进度会过时，标上时间 */
+  private goalAt: number | null = null;
   private players = new Set<string>();
   private spectators = new Set<string>();
   private poller: NodeJS.Timeout | null = null;
@@ -336,7 +347,7 @@ export class MinecraftSession implements GameSession {
       return `还没有叫「${action.name}」的图纸${this.designs.size ? `（现在有：${[...this.designs.keys()].join('、')}）` : ''}：先 design 交一张，或者 template 拿一张参考图纸。`;
     }
     if (['goal', 'chat'].includes(action.action) && !action.text?.trim()) return `${action.action} 要填 text。`;
-    if (this.running && ['find', 'equip', 'drop', 'place'].includes(action.action)) {
+    if (this.running && action.action === 'place') {
       return `身体正在${this.running.label}，${action.action} 要等它做完，或者先 stop。`;
     }
     return null;
@@ -347,7 +358,8 @@ export class MinecraftSession implements GameSession {
     const runtime = this.runtime;
     if (!runtime) return '还没进游戏。';
     const name = action.name?.trim().toLowerCase().replace(/^minecraft:/, '').replace(/\s+/g, '_') ?? '';
-    const count = Math.max(1, Math.min(64, Math.round(action.index ?? 1)));
+    // 丢东西可以一次丢好几组（背包满了清杂物）；别的动作一次最多 64
+    const count = Math.max(1, Math.min(action.action === 'drop' ? 36 * 64 : 64, Math.round(action.index ?? 1)));
     const xyz = parseXyz(action.text) ?? (action.action === 'build' ? this.sites.get(action.name?.trim() ?? '')?.origin ?? null : null);
     // 创造模式：要用的东西从创造物品栏直接拿（和真人一样），不用采集、合成
     if (this.options.creative) {
@@ -360,6 +372,7 @@ export class MinecraftSession implements GameSession {
     switch (action.action) {
       case 'goal':
         this.goal = action.text!.trim();
+        this.goalAt = Date.now();
         this.journal?.setGoal(this.goal);
         this.note(`目标：${this.goal}`);
         return `记下了，目标：${this.goal}`;
@@ -457,10 +470,12 @@ export class MinecraftSession implements GameSession {
         return was ? `停下了（原来在${was.label}${dropped ? `，排着的 ${dropped} 件也取消了` : ''}）。` : '本来就没在做什么。';
       }
       case 'find': {
-        const block = await this.body('search_block', { block: name, radius: 64, count: 3 }, 30_000);
-        if (block.outcome === 'succeeded') return `找到了：${block.summary}`;
+        // 每一处的坐标和距离（近的在前）：她接着 go 或者 dig 要用
+        const where = (r: MinecraftActionResult) => r.observations.map((o) => `- ${fmtFound(o.data)}`).join('\n');
+        const block = await this.body('search_block', { block: name, radius: 64, count: 8 }, 30_000);
+        if (block.outcome === 'succeeded') return `找到了 ${block.observations.length} 处 ${name}：\n${where(block)}`;
         const entity = await this.body('search_entity', { entity: name, radius: 64 }, 30_000);
-        if (entity.outcome === 'succeeded') return `找到了：${entity.summary}`;
+        if (entity.outcome === 'succeeded') return `找到了 ${entity.observations.length} 个 ${name}：\n${where(entity)}`;
         return `附近 64 格内没找到 ${name}。`;
       }
       case 'equip': {
@@ -537,6 +552,17 @@ export class MinecraftSession implements GameSession {
         default: return ['pickup_drops', { radius: 12 }, '捡附近的掉落物'];
       }
     })();
+    // 打怪、逃跑、躲起来不排队：先停下手上的事，自保完再接着做（能接着做的）
+    if (this.running && URGENT.has(action.action)) {
+      const was = this.running;
+      await this.refresh().catch(() => {});
+      const again = this.resumeOf(was);
+      await this.replaceRunning();
+      if (again) this.queue.unshift(again);
+      this.begin(bodyAction, args, label, meta);
+      const after = again ? `；做完接着${again.label}` : was.abort ? '' : `（${was.label}没有接着做：再做一遍会多做一份，要的话做完再下）`;
+      return `先停下${was.label}，开始${label}${after}。做完或卡住了会在下一个时刻告诉你。`;
+    }
     if (this.running) {
       this.queue.push({ bodyAction, args, label, meta });
       return `身体正在${this.running.label}，「${label}」排上了（前面还有 ${this.queue.length} 件，包括正在做的）。`;
@@ -755,7 +781,7 @@ export class MinecraftSession implements GameSession {
       return;
     }
     const id = randomUUID();
-    const running: Running = { id, label, startedAt: Date.now(), inventory: { ...(this.snapshot?.body?.inventory ?? {}) }, meta };
+    const running: Running = { id, label, startedAt: Date.now(), inventory: { ...(this.snapshot?.body?.inventory ?? {}) }, meta, bodyAction, args };
     this.running = running;
     this.options.onAction?.(label);
     this.options.record({ type: 'act', text: label });
@@ -812,7 +838,31 @@ export class MinecraftSession implements GameSession {
 
   /** 让身体马上做一件短的事，等结果（身体在做长动作时不插队，见 refuse） */
   private async body(name: string, args: Record<string, unknown>, timeoutMs: number): Promise<MinecraftActionResult> {
-    return this.runtime!.command<MinecraftActionResult>('execute-action', { id: randomUUID(), name, args }, timeoutMs);
+    // 拿、丢、找：身体在做长动作时也马上做，长动作不停
+    const command = this.running && QUICK_ACTIONS.has(name) ? 'quick-action' : 'execute-action';
+    return this.runtime!.command<MinecraftActionResult>(command, { id: randomUUID(), name, args }, timeoutMs);
+  }
+
+  /** 死了告诉她：东西还在不在身上按服务器的「死亡不掉落」（keepInventory，主人可能直播中途改）说；查不到就两种都说 */
+  private async deathNote(position?: { x: number; y: number; z: number }): Promise<void> {
+    const reply = this.options.rcon ? await rcon(this.options.rcon, 'gamerule keepInventory').catch(() => '') : '';
+    const keep = /true/.test(reply) ? true : /false/.test(reply) ? false : null;
+    const items = keep === true ? '服务器开着死亡不掉落，身上的东西都还在身上'
+      : keep === false ? '身上的东西掉在死的地方，5 分钟内回去还能捡（过了就没了）'
+        : '服务器开着死亡不掉落的话东西都还在身上；没开就掉在死的地方，5 分钟内回去还能捡';
+    this.push(`你死了${position ? `（在 ${fmtXyz(position)}）` : ''}。会在出生点（或者睡过的床边）复活，${items}。`, true);
+  }
+
+  /** 被自保的事打断的那件事，之后怎么接着做（不能接着做的返回 null）：采集只补还差的数量 */
+  private resumeOf(was: Running): { bodyAction: string; args: Record<string, unknown>; label: string; meta?: JournalMeta } | null {
+    if (was.abort || !was.bodyAction || !was.args || !RESUMABLE.has(was.bodyAction)) return null;
+    if (was.bodyAction !== 'collect_item') return { bodyAction: was.bodyAction, args: was.args, label: was.label, meta: was.meta };
+    const item = String(was.args.item ?? was.args.block ?? '');
+    const now = this.snapshot?.body?.inventory ?? {};
+    const got = (now[item] ?? 0) - (was.inventory[item] ?? 0);
+    const left = Number(was.args.quantity ?? 1) - Math.max(0, got);
+    if (left <= 0) return null;
+    return { bodyAction: 'collect_item', args: { ...was.args, quantity: left }, label: `采集 ${item} ×${left}`, meta: was.meta };
   }
 
   /** 新的长动作要开始：停掉正在做的（返回原来在做什么） */
@@ -878,7 +928,7 @@ export class MinecraftSession implements GameSession {
         // 正在做的事由身体自己报（死的时候它会停掉并回报），这里不清，免得两边对不上
         this.queue = [];
         if (event.position) this.journal?.addDeath({ x: Math.floor(event.position.x), y: Math.floor(event.position.y), z: Math.floor(event.position.z), dimension: this.dimension() });
-        this.push(`你死了${event.position ? `（在 ${fmtXyz(event.position)}）` : ''}。会在出生点复活，身上的东西掉在死的地方，几分钟内回去还能捡。`, true);
+        void this.deathNote(event.position);
         setTimeout(() => void this.attachSpectators(), 3000);
         break;
       case 'food-shortage':
@@ -892,6 +942,9 @@ export class MinecraftSession implements GameSession {
         break;
       case 'creeper-evaded':
         this.push(event.ok ? '苦力怕贴过来，身体先躲开了。' : '苦力怕贴过来，身体想躲开但没躲掉！', true);
+        break;
+      case 'fought-back':
+        this.push(event.killed ? `被 ${event.attacker} 打了，身体拿上武器还手，把它打死了。` : `被 ${event.attacker} 打了，身体拿上武器还手，没打死（它跑开了，或者打了 20 秒还在）。`, true);
         break;
       case 'movement-blocked':
         this.push(`跟着 ${event.player} 走的时候被挡住了，过不去（离他 ${Math.round(event.distance)} 格）。`, true);
@@ -1264,7 +1317,7 @@ export class MinecraftSession implements GameSession {
     const lines = this.lines;
     this.lines = [];
     const notes: string[] = [];
-    notes.push(this.goal ? `你的目标：${this.goal}` : '你还没写下目标（想做什么可以用 goal 写下来）。');
+    notes.push(this.goal ? `你的目标（${this.goalAt ? `你 ${new Date(this.goalAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })} 写的` : '上一局写的'}）：${this.goal}` : '你还没写下目标（想做什么可以用 goal 写下来）。');
     if (this.running) {
       const progress = inventoryChange(this.running.inventory, s?.body?.inventory);
       notes.push(`身体正在：${this.running.label}（${Math.round((Date.now() - this.running.startedAt) / 1000)} 秒了${progress ? `，到现在背包 ${progress}` : ''}）`);
@@ -1324,7 +1377,8 @@ function formatActionList(): string {
 function describeResult(r: MinecraftActionResult, label: string): string {
   if (r.outcome === 'succeeded') return `${label}：做完了（${r.summary}）${formatDelta(r.inventoryDelta)}`;
   if (r.outcome === 'partial') return `${label}：只做了一部分（${r.summary}）${formatDelta(r.inventoryDelta)}`;
-  if (r.outcome === 'cancelled') return `${label}：停下了`;
+  // 有具体原因（被打断的、卡住的）就带上；笼统的「cancelled」不写
+  if (r.outcome === 'cancelled') return r.summary && !/cancel/i.test(r.summary) ? `${label}：停下了（${r.summary}）` : `${label}：停下了`;
   const code = r.error?.code ?? 'adapter_error';
   const detail = typeof r.error?.details?.message === 'string' ? r.error.details.message : r.summary;
   return `${label}：没成，${ERROR_TEXT[code] ?? code}（${detail}）${formatDelta(r.inventoryDelta)}`;
@@ -1378,6 +1432,13 @@ function parseXyz(text: string | undefined): { x: number; y: number; z: number }
 
 function fmtXyz(p: { x: number; y: number; z: number }): string {
   return `(${Math.round(p.x)}, ${Math.round(p.y)}, ${Math.round(p.z)})`;
+}
+
+/** find 找到的一处：坐标（方块坐标，能直接给 go、dig 用）和离她多远 */
+function fmtFound(data: Record<string, unknown> | undefined): string {
+  const p = data?.position as { x: number; y: number; z: number } | undefined;
+  if (!p) return String(data?.name ?? '?');
+  return `${String(data?.name ?? '')} 在 ${Math.floor(p.x)} ${Math.floor(p.y)} ${Math.floor(p.z)}，离你 ${Number(data?.distance ?? 0).toFixed(0)} 格`;
 }
 
 function fmt1(n: number): string {

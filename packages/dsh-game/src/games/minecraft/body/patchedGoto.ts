@@ -232,7 +232,9 @@ function walkGoto(
     }
 
     function onPathStop(): void {
-      settle(buildResult(false, 'interrupted', 'Path was stopped'));
+      // 我们自己取消的走 onAbort；这里是寻路器自己放弃（补丁：连续卡住重置三次、一步没挪就停）：是卡住了，不是被打断
+      if (options.signal?.aborted) return settle(buildResult(false, 'interrupted', 'Navigation was cancelled'));
+      settle(buildResult(false, 'stagnation', 'The pathfinder kept getting stuck on the way and gave up'));
     }
 
     function onAbort(): void {

@@ -15,7 +15,7 @@ import { MinecraftSession } from '../src/games/minecraft/session.js';
 import { RconLink, rcon as rconRaw, type RconTarget } from '../src/games/minecraft/rcon.js';
 
 const ROOT = path.resolve(process.argv[2] ?? '.');
-/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量、氧气只算自己的；breath 只跑氧气这项）、build（盖房子）、farm（种地、养动物）、journal（世界日志）、nether（桶、黑曜石、下界传送门）、creative（形状图纸、创造模式一层层盖）、rcon（跟拍用的常开 RCON 连接：连发的命令每条都执行）、不填 = 全部 */
+/** 跑哪些：basic（基本操作）、edge（名字、配方回环、掉落和数量、氧气只算自己的；breath 只跑氧气这项）、build（盖房子）、farm（种地、养动物）、journal（世界日志）、nether（桶、黑曜石、下界传送门）、creative（形状图纸、创造模式一层层盖）、rcon（跟拍用的常开 RCON 连接：连发的命令每条都执行）、live（第一场直播报的身体问题）、不填 = 全部 */
 const SUITE = process.argv[3] ?? 'all';
 const props = Object.fromEntries(
   fs.readFileSync(path.join(ROOT, '.mc-server', 'server.properties'), 'utf8').split(/\r?\n/)
@@ -87,8 +87,8 @@ async function act(action: string, args: { name?: string; index?: number; text?:
   const reply = await session.act({ action, ...args });
   note(`act ${action} ${JSON.stringify(args)} → ${reply.split('\n')[0].slice(0, 160)}`);
   if (onStart) void onStart();
-  if (!/^开始|排上了/.test(reply)) return reply;
-  const label = reply.match(/^开始(.+?)。/)?.[1] ?? reply.match(/「(.+?)」排上了/)?.[1] ?? '';
+  if (!/^开始|排上了|^先停下/.test(reply)) return reply;
+  const label = reply.match(/^开始(.+?)。/)?.[1] ?? reply.match(/「(.+?)」排上了/)?.[1] ?? reply.match(/^先停下.+?，开始(.+?)[；。（]/)?.[1] ?? '';
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
     const hit = lines.find((l) => l.startsWith(`${label}：`));
@@ -352,6 +352,456 @@ async function breathCases(): Promise<void> {
   check(moved < 1, `身体没自己跑去找空气（挪了 ${moved.toFixed(1)} 格）`);
   await rcon(`kill @e[type=pig,x=${P.x},y=${P.y},z=${P.z},distance=..3]`);
   await rcon(`fill ${P.x - 1} ${P.y - 1} ${P.z - 1} ${P.x + 1} ${P.y + 2} ${P.z + 1} air`);
+}
+
+// ---------- 第一场直播（2026-10-25）报的身体问题：每项先在这里复现，修好以后留着防回退 ----------
+/** 开阔的场地（逃跑要跑得开）：61×61 草地，下面五层土、再下面基岩 */
+const LX = 5300, LY = 200, LZ = 5000;
+async function buildLiveArena(): Promise<void> {
+  await rcon(`forceload add ${LX - 32} ${LZ - 32} ${LX + 32} ${LZ + 32}`);
+  await sleep(1500);
+  for (let y = LY - 6; y <= LY + 10; y++) await rcon(`fill ${LX - 30} ${y} ${LZ - 30} ${LX + 30} ${y} ${LZ + 30} air`);
+  await rcon(`fill ${LX - 30} ${LY - 6} ${LZ - 30} ${LX + 30} ${LY - 6} ${LZ + 30} bedrock`);
+  for (let y = LY - 5; y < LY; y++) await rcon(`fill ${LX - 30} ${y} ${LZ - 30} ${LX + 30} ${y} ${LZ + 30} dirt`);
+  await rcon(`fill ${LX - 30} ${LY} ${LZ - 30} ${LX + 30} ${LY} ${LZ + 30} grass_block`);
+  await rcon(`kill @e[type=!player,x=${LX},y=${LY},z=${LZ},distance=..45]`);
+}
+async function liveReset(at = { x: LX, z: LZ }): Promise<void> {
+  await act('stop');
+  await rcon(`kill @e[type=!player,x=${LX},y=${LY},z=${LZ},distance=..45]`);
+  await rcon(`clear ${NAME}`);
+  await rcon(`effect give ${NAME} resistance 120 4 true`);
+  await rcon(`tp ${NAME} ${at.x + 0.5} ${LY + 1} ${at.z + 0.5}`);
+  await sleep(1500);
+}
+async function heldItem(): Promise<string> {
+  return (await rcon(`data get entity ${NAME} SelectedItem.id`)).match(/"minecraft:([a-z_]+)"/)?.[1] ?? 'nothing';
+}
+async function herPos(): Promise<number[]> {
+  return (await rcon(`data get entity ${NAME} Pos`)).match(/-?\d+(\.\d+)?(?=d)/g)?.map(Number) ?? [];
+}
+
+/** 只跑名字里带这个的几项（mc-selftest.mjs live 直播3）；不填就全跑 */
+const PICK = (process.argv[4] ?? '').replace(/\s/g, '');
+const want = (label: string) => !PICK || label.replace(/\s/g, '').includes(PICK);
+
+async function liveCases(): Promise<void> {
+  await buildLiveArena();
+
+  if (want('直播 1：打怪先拿最好的武器，打完换回原来手里的')) {
+    begin('直播 1：打怪先拿最好的武器，打完换回原来手里的');
+    {
+      await liveReset();
+      await rcon(`give ${NAME} cobblestone 59`);
+      await rcon(`give ${NAME} stone_pickaxe 1`);
+      await rcon(`give ${NAME} diamond_sword 1`);
+      await sleep(800);
+      await session.act({ action: 'equip', name: 'cobblestone' });
+      await rcon(`summon husk ${LX + 3} ${LY + 1} ${LZ} {NoAI:1b}`);
+      const seen = new Set<string>();
+      let watching = true;
+      const line = await act('attack', { name: 'husk', index: 1 }, 90_000, async () => {
+        while (watching) {
+          seen.add(await heldItem());
+          await sleep(300);
+        }
+      });
+      watching = false;
+      check(/：做完了/.test(line), `打死了（${line.slice(0, 100)}）`);
+      check(seen.has('diamond_sword'), `打的时候拿的是钻石剑（看到手里拿过：${[...seen].join('、')}）`);
+      await sleep(500);
+      check((await heldItem()) === 'cobblestone', `打完换回圆石（手里是 ${await heldItem()}）`);
+    }
+  }
+
+  if (want('直播 7：采集被叫停以后马上逃跑，要真的跑开')) {
+    begin('直播 7：采集被叫停以后马上逃跑，要真的跑开');
+    {
+      await liveReset();
+      await rcon(`give ${NAME} stone_pickaxe 1`);
+      await rcon(`fill ${LX + 20} ${LY + 1} ${LZ + 20} ${LX + 22} ${LY + 2} ${LZ + 22} stone`);
+      await rcon(`summon zombie ${LX - 3} ${LY + 1} ${LZ} {NoAI:1b}`);
+      await sleep(800);
+      await session.act({ action: 'collect', name: 'cobblestone', index: 8 });
+      await sleep(2500);
+      await act('stop');
+      const start = await herPos();
+      const line = await act('flee', {}, 60_000);
+      const end = await herPos();
+      const moved = start.length && end.length ? Math.hypot(end[0] - start[0], end[2] - start[2]) : 0;
+      check(/：做完了/.test(line), `逃跑做完了（${line.slice(0, 160)}）`);
+      check(moved >= 8, `跑开了 ${moved.toFixed(1)} 格（至少 8）`);
+    }
+  }
+
+  if (want('直播 7：正在采集时下逃跑，马上开始，不排队')) {
+    begin('直播 7：正在采集时下逃跑，马上开始，不排队');
+    {
+      await liveReset();
+      await rcon(`give ${NAME} stone_pickaxe 1`);
+      await rcon(`fill ${LX + 20} ${LY + 1} ${LZ + 20} ${LX + 22} ${LY + 2} ${LZ + 22} stone`);
+      await rcon(`summon zombie ${LX - 3} ${LY + 1} ${LZ} {NoAI:1b}`);
+      await sleep(800);
+      await session.act({ action: 'collect', name: 'cobblestone', index: 8 });
+      await sleep(2500);
+      const line = await act('flee', {}, 60_000);
+      note(`逃跑：${line.slice(0, 200)}`);
+      check(/^逃开怪物：做完了/.test(line), `逃跑马上开始、做完了（${line.slice(0, 120)}）`);
+      check(/接着做排着的「采集 cobblestone/.test(line), '逃完接着采集');
+      await act('stop');
+    }
+  }
+
+  if (want('直播 1/7：采集时挨打，身体停下采集、拿上武器还手，告诉她')) {
+    begin('直播 1/7：采集时挨打，身体停下采集、拿上武器还手，告诉她');
+    {
+      await liveReset();
+      await rcon(`effect clear ${NAME} resistance`);
+      await rcon(`effect give ${NAME} resistance 120 1 true`);
+      await rcon(`give ${NAME} stone_pickaxe 1`);
+      await rcon(`give ${NAME} diamond_sword 1`);
+      await rcon(`fill ${LX + 8} ${LY + 1} ${LZ - 1} ${LX + 10} ${LY + 2} ${LZ + 1} stone`);
+      await sleep(800);
+      const seen = new Set<string>();
+      let watching = true;
+      const watcher = (async () => { while (watching) { seen.add(await heldItem()); await sleep(250); } })();
+      const heard: string[] = [];
+      const line = await act('collect', { name: 'cobblestone', index: 12 }, 120_000, async () => {
+        await sleep(3000);
+        await rcon(`summon husk ${LX + 6} ${LY + 1} ${LZ + 3}`);
+      });
+      for (let i = 0; i < 15; i++) {
+        heard.push(...(await session.wait(AbortSignal.timeout(1000), 1000)).lines);
+        if (heard.some((l) => /身体拿上武器还手/.test(l))) break;
+      }
+      watching = false;
+      await watcher;
+      note(`她听到：${heard.join(' / ').slice(0, 300)}`);
+      check(/hit her|挨打|fight back/.test(line), `采集停下了，说了是挨打（${line.slice(0, 160)}）`);
+      check(heard.some((l) => /被 husk 打了，身体拿上武器还手/.test(l)), '告诉她身体还手了');
+      check(seen.has('diamond_sword'), `还手时拿的是钻石剑（手里拿过：${[...seen].join('、')}）`);
+      await rcon(`kill @e[type=husk,x=${LX},y=${LY},z=${LZ},distance=..45]`);
+    }
+  }
+
+  if (want('直播 7：逃跑时挨打，接着跑，不回头打')) {
+    begin('直播 7：逃跑时挨打，接着跑，不回头打');
+    for (let i = 0; i < 2; i++) {
+      await liveReset();
+      await rcon(`effect clear ${NAME} resistance`);
+      await rcon(`effect give ${NAME} resistance 120 1 true`);
+      await rcon(`give ${NAME} diamond_sword 1`);
+      // 血厚的尸壳，一出来就追着打；她马上开始逃（跑的时候挨打，不该回头打）
+      await rcon(`summon husk ${LX + 3} ${LY + 1} ${LZ} {Health:100f,attributes:[{id:"minecraft:max_health",base:100}]}`);
+      const start = await herPos();
+      const line = await act('flee', {}, 60_000);
+      const end = await herPos();
+      const moved = start.length && end.length ? Math.hypot(end[0] - start[0], end[2] - start[2]) : 0;
+      check(/逃开怪物：做完了/.test(line) && moved >= 8, `第 ${i + 1} 次：跑开了 ${moved.toFixed(1)} 格（${line.slice(0, 140)}）`);
+    }
+    await rcon(`kill @e[type=husk,x=${LX},y=${LY},z=${LZ},distance=..45]`);
+  }
+
+  if (want('直播 3：find 给出每一处的坐标和距离')) {
+    begin('直播 3：find 给出每一处的坐标和距离');
+    {
+      await liveReset();
+      const ores = [[LX + 5, LY - 2, LZ + 3], [LX - 4, LY - 3, LZ + 7], [LX + 9, LY - 4, LZ - 6]];
+      for (const [x, y, z] of ores) await rcon(`setblock ${x} ${y} ${z} diamond_ore`);
+      await sleep(800);
+      const found = await session.act({ action: 'find', name: 'diamond_ore' });
+      note(found.replace(/\n/g, ' / ').slice(0, 300));
+      for (const [x, y, z] of ores) check(found.includes(`${x} ${y} ${z}`), `列出了 ${x} ${y} ${z}`);
+      check(/离你 \d+ 格/.test(found), '说了多远');
+      for (const [x, y, z] of ores) await rcon(`setblock ${x} ${y} ${z} dirt`);
+    }
+  }
+
+  if (want('直播 2：背包满了要直说，列出能丢的')) {
+    begin('直播 2：背包满了要直说，列出能丢的');
+    await liveReset();
+    await rcon(`give ${NAME} iron_pickaxe 1`);
+    // 35 格塞满：圆石、花岗岩、闪长岩、泥土、沙砾各 7 组（每组 64）
+    for (const junk of ['cobblestone', 'granite', 'diorite', 'dirt', 'gravel']) await rcon(`give ${NAME} ${junk} ${64 * 7}`);
+    await rcon(`setblock ${LX + 2} ${LY} ${LZ} diamond_ore`);
+    await sleep(1000);
+    const line = await act('collect', { name: 'diamond_ore', index: 1 }, 90_000);
+    note(line.slice(0, 300));
+    check(/背包满/.test(line), `说了背包满了（${line.slice(0, 160)}）`);
+    check(/cobblestone/.test(line) && /drop/.test(line), '列出了能丢的、说了用 drop');
+    check(!/chest/.test(line), '没说箱子');
+    // 照它说的丢掉一种杂物（一次丢 448 个，不止一组），就地丢、不走开，再采就采到了
+    const before = await herPos();
+    const dropped = await session.act({ action: 'drop', name: 'granite', index: 448 });
+    const after = await herPos();
+    note(dropped.slice(0, 160));
+    check((await serverCount('granite')) === 0, `花岗岩一次丢完了（还剩 ${await serverCount('granite')}）`);
+    check(before.length > 0 && after.length > 0 && Math.hypot(after[0] - before[0], after[2] - before[2]) < 1, '就地丢，没走开');
+    await rcon(`kill @e[type=item,x=${LX},y=${LY},z=${LZ},distance=..10]`);
+    const again = await act('collect', { name: 'diamond_ore', index: 1 }, 90_000);
+    check((await serverCount('diamond')) === 1, `丢完再采，采到钻石了（${again.slice(0, 100)}）`);
+    await rcon(`setblock ${LX + 2} ${LY} ${LZ} grass_block`);
+  }
+
+  if (want('直播 6：做长动作时 equip、drop、find 马上做，长动作不停')) {
+    begin('直播 6：做长动作时 equip、drop、find 马上做，长动作不停');
+    await liveReset();
+    await rcon(`give ${NAME} stone_pickaxe 1`);
+    await rcon(`give ${NAME} diamond_sword 1`);
+    await rcon(`give ${NAME} dirt 10`);
+    await rcon(`fill ${LX + 15} ${LY + 1} ${LZ + 15} ${LX + 17} ${LY + 2} ${LZ + 17} stone`);
+    await sleep(800);
+    const start = await session.act({ action: 'collect', name: 'cobblestone', index: 6 });
+    await sleep(2000);
+    const eq = await session.act({ action: 'equip', name: 'diamond_sword' });
+    note(`equip：${eq.slice(0, 120)}`);
+    check(!/要等它做完/.test(eq) && /做完了|拿上/.test(eq), `equip 马上做了（${eq.slice(0, 100)}）`);
+    const dr = await session.act({ action: 'drop', name: 'dirt', index: 10 });
+    check(!/要等它做完/.test(dr) && (await serverCount('dirt')) === 0, `drop 马上做了（${dr.slice(0, 100)}）`);
+    const fd = await session.act({ action: 'find', name: 'stone' });
+    check(/找到了/.test(fd), `find 马上做了（${fd.slice(0, 80)}）`);
+    // 长动作没被打断：最后采到 6 个圆石
+    const label = start.match(/^开始(.+?)。/)?.[1] ?? '';
+    let done = '';
+    for (let i = 0; i < 60 && !done; i++) {
+      lines.push(...(await session.wait(AbortSignal.timeout(3000), 3000)).lines);
+      done = lines.find((l) => l.startsWith(`${label}：`)) ?? '';
+    }
+    if (done) lines.splice(lines.indexOf(done), 1);
+    check(/：做完了/.test(done), `采集照常做完了（${done.slice(0, 120)}）`);
+  }
+
+  if (want('直播 5：埋在石头里的一窝矿都采到')) {
+    begin('直播 5：埋在石头里的一窝矿都采到');
+    await liveReset();
+    await rcon(`give ${NAME} iron_pickaxe 1`);
+    // 一大块石头（东边 3 格起，7×5×7），里面埋三块钻石矿：离石头表面 2~3 格，哪一面都露不出来
+    await rcon(`fill ${LX + 3} ${LY + 1} ${LZ - 3} ${LX + 9} ${LY + 5} ${LZ + 3} stone`);
+    const ores = [[LX + 5, LY + 2, LZ], [LX + 6, LY + 2, LZ], [LX + 6, LY + 3, LZ + 1]];
+    for (const [x, y, z] of ores) await rcon(`setblock ${x} ${y} ${z} diamond_ore`);
+    await sleep(1000);
+    const t0 = Date.now();
+    const line = await act('collect', { name: 'diamond_ore', index: 3 }, 180_000);
+    const secs = Math.round((Date.now() - t0) / 1000);
+    note(line.slice(0, 240));
+    check((await serverCount('diamond')) === 3, `三块都采到了（${await serverCount('diamond')} 个，${secs} 秒）`);
+    check(secs <= 90, `90 秒内（用了 ${secs} 秒）`);
+    await rcon(`fill ${LX + 3} ${LY + 1} ${LZ - 3} ${LX + 9} ${LY + 5} ${LZ + 3} air`);
+  }
+
+  if (want('直播 5：远处石头里的矿')) {
+    begin('直播 5：远处石头里的矿（15~25 格外，中间全是石头）');
+    await liveReset();
+    await rcon(`give ${NAME} iron_pickaxe 1`);
+    // 地下：一整块 41×12×41 的石头，她在中间一个 3×3×3 的小洞里
+    for (let y = LY - 5; y <= LY + 6; y++) await rcon(`fill ${LX - 20} ${y} ${LZ - 20} ${LX + 20} ${y} ${LZ + 20} stone`);
+    await rcon(`fill ${LX - 1} ${LY + 1} ${LZ - 1} ${LX + 1} ${LY + 3} ${LZ + 1} air`);
+    const ores = [[LX + 15, LY + 1, LZ + 2], [LX - 3, LY - 2, LZ + 18], [LX - 17, LY + 4, LZ - 12]];
+    for (const [x, y, z] of ores) await rcon(`setblock ${x} ${y} ${z} diamond_ore`);
+    await rcon(`tp ${NAME} ${LX + 0.5} ${LY + 1} ${LZ + 0.5}`);
+    await sleep(1500);
+    const t0 = Date.now();
+    const line = await act('collect', { name: 'diamond_ore', index: 3 }, 400_000);
+    const secs = Math.round((Date.now() - t0) / 1000);
+    note(line.slice(0, 300));
+    note(`采到 ${await serverCount('diamond')} 个，${secs} 秒`);
+    check((await serverCount('diamond')) === 3 || /走不到|cannot reach|could not/.test(line), `要么都采到，要么说清哪几块为什么采不到（${line.slice(0, 160)}）`);
+    check(secs <= 180, `3 分钟内有结果（用了 ${secs} 秒）`);
+    for (let y = LY - 5; y <= LY + 6; y++) await rcon(`fill ${LX - 20} ${y} ${LZ - 20} ${LX + 20} ${y} ${LZ + 20} air`);
+    for (let y = LY - 5; y < LY; y++) await rcon(`fill ${LX - 20} ${y} ${LZ - 20} ${LX + 20} ${y} ${LZ + 20} dirt`);
+    await rcon(`fill ${LX - 20} ${LY} ${LZ - 20} ${LX + 20} ${LY} ${LZ + 20} grass_block`);
+  }
+
+  if (want('直播 8：矿道里挂着洞穴藤蔓')) {
+    begin('直播 8：矿道里挂着洞穴藤蔓，照样走过去采矿');
+    await liveReset();
+    await rcon(`give ${NAME} iron_pickaxe 1`);
+    // 东边一块石头，挖一条 1×2、12 格长的矿道；矿道上半格每隔一格挂一株洞穴藤蔓；尽头一块钻石矿
+    await rcon(`fill ${LX + 2} ${LY + 1} ${LZ - 2} ${LX + 16} ${LY + 4} ${LZ + 2} stone`);
+    await rcon(`fill ${LX + 2} ${LY + 1} ${LZ} ${LX + 14} ${LY + 2} ${LZ} air`);
+    for (let x = LX + 4; x <= LX + 12; x += 2) await rcon(`setblock ${x} ${LY + 2} ${LZ} cave_vines_plant`);
+    await rcon(`setblock ${LX + 15} ${LY + 1} ${LZ} diamond_ore`);
+    await sleep(1000);
+    const t0 = Date.now();
+    const line = await act('collect', { name: 'diamond_ore', index: 1 }, 180_000);
+    const secs = Math.round((Date.now() - t0) / 1000);
+    note(line.slice(0, 240));
+    check((await serverCount('diamond')) === 1, `采到了（${secs} 秒）`);
+    check(secs <= 40, `40 秒内（用了 ${secs} 秒）`);
+    await rcon(`fill ${LX + 2} ${LY + 1} ${LZ - 2} ${LX + 16} ${LY + 4} ${LZ + 2} air`);
+  }
+
+  if (want('直播 11：死亡提示按死亡不掉落说')) {
+    begin('直播 11：死亡提示按「死亡不掉落」的实际设置说');
+    const was = (await rcon('gamerule keepInventory')).match(/(true|false)/)?.[1] ?? 'false';
+    for (const keep of ['true', 'false']) {
+      await liveReset();
+      await rcon(`gamerule keepInventory ${keep}`);
+      await rcon(`effect clear ${NAME}`);
+      await sleep(500);
+      await rcon(`kill ${NAME}`);
+      const heard: string[] = [];
+      for (let i = 0; i < 10 && !heard.some((l) => /你死了/.test(l)); i++) heard.push(...(await session.wait(AbortSignal.timeout(1000), 1000)).lines);
+      const line = heard.find((l) => /你死了/.test(l)) ?? '';
+      note(`keepInventory=${keep}：${line}`);
+      check(keep === 'true' ? /还在身上/.test(line) && !/掉在死的地方/.test(line) : /掉在死的地方/.test(line) && !/还在身上/.test(line), `keepInventory=${keep} 说得对（${line.slice(0, 80)}）`);
+      await sleep(3000);
+    }
+    await rcon(`gamerule keepInventory ${was}`);
+  }
+
+  if (want('直播 12：目标标上写的时间')) {
+    begin('直播 12：目标是她的原话，标上写的时间');
+    await session.act({ action: 'goal', text: '一身钻石装备：现在有 7 颗，还要挖 17 颗' });
+    const notes = (await session.wait(AbortSignal.timeout(3000), 2000)).notes.join(' ');
+    note(notes.slice(0, 200));
+    check(/你的目标（你 \d\d:\d\d 写的）：一身钻石装备/.test(notes), '每个时刻的提醒里标了写的时间');
+  }
+
+  if (want('倒水：庄稼和草旁边挖坑倒水')) {
+    begin('倒水：庄稼和草旁边挖坑倒水（不同站位，水要进坑、不冲庄稼）');
+    for (let round = 0; round < 2; round++) {
+      for (const [label, sx, sz] of [['田的斜对角', LX + 4.5, LZ + 4.5], ['田上', LX + 4.5, LZ + 3.5], ['草地上', LX + 6.5, LZ + 3.5], ['离坑两格', LX + 7.5, LZ + 5.5]] as const) {
+        await liveReset({ x: Math.floor(sx), z: Math.floor(sz) });
+        await rcon(`fill ${LX + 1} ${LY + 1} ${LZ + 1} ${LX + 9} ${LY + 1} ${LZ + 7} short_grass replace air`);
+        await rcon(`fill ${LX + 3} ${LY} ${LZ + 3} ${LX + 4} ${LY} ${LZ + 4} farmland[moisture=7]`);
+        await rcon(`fill ${LX + 3} ${LY + 1} ${LZ + 3} ${LX + 4} ${LY + 1} ${LZ + 4} carrots`);
+        await rcon(`give ${NAME} water_bucket 1`);
+        await rcon(`tp ${NAME} ${sx} ${LY + 1} ${sz}`);
+        await sleep(1200);
+        await act('dig', { text: `${LX + 5} ${LY} ${LZ + 3}` }, 60_000);
+        const line = await act('bucket', { name: 'water_bucket', text: `${LX + 5} ${LY} ${LZ + 3}` }, 60_000);
+        const source = /passed/i.test(await rcon(`execute if block ${LX + 5} ${LY} ${LZ + 3} water[level=0]`));
+        const crops = Number((await rcon(`execute if blocks ${LX + 3} ${LY + 1} ${LZ + 3} ${LX + 4} ${LY + 1} ${LZ + 4} ${LX + 3} ${LY + 1} ${LZ + 3} all`)).match(/count: (\d+)/)?.[1] ?? -1);
+        let carrots = 0;
+        for (const [x, z] of [[3, 3], [3, 4], [4, 3], [4, 4]]) if (/passed/i.test(await rcon(`execute if block ${LX + x} ${LY + 1} ${LZ + z} carrots`))) carrots++;
+        void crops;
+        check(source && carrots === 4, `第 ${round + 1} 轮 ${label}：坑里是水源 ${source}，胡萝卜还剩 ${carrots}/4（${line.slice(0, 120)}）`);
+        await rcon(`fill ${LX + 1} ${LY - 1} ${LZ + 1} ${LX + 9} ${LY - 1} ${LZ + 7} dirt`);
+        await rcon(`fill ${LX + 1} ${LY} ${LZ + 1} ${LX + 9} ${LY} ${LZ + 7} grass_block`);
+        await rcon(`fill ${LX + 1} ${LY + 1} ${LZ + 1} ${LX + 9} ${LY + 2} ${LZ + 7} air`);
+      }
+    }
+  }
+
+  if (want('直播：go 在地下挖穿石头')) {
+    begin('直播：go 在地下一路挖过去（40 格实心石头，不用一格格 dig）');
+    await liveReset();
+    await rcon(`give ${NAME} iron_pickaxe 1`);
+    for (let y = LY - 5; y <= LY + 6; y++) await rcon(`fill ${LX - 22} ${y} ${LZ - 5} ${LX + 22} ${y} ${LZ + 5} stone`);
+    await rcon(`fill ${LX - 21} ${LY + 1} ${LZ - 1} ${LX - 19} ${LY + 3} ${LZ + 1} air`);
+    await rcon(`tp ${NAME} ${LX - 19.5} ${LY + 1} ${LZ + 0.5}`);
+    await sleep(1500);
+    const t0 = Date.now();
+    const line = await act('go', { text: `${LX + 20} ${LY + 1} ${LZ}` }, 400_000);
+    const secs = Math.round((Date.now() - t0) / 1000);
+    const end = await herPos();
+    note(line.slice(0, 200));
+    check(/：做完了/.test(line) && end.length > 0 && Math.abs(end[0] - (LX + 20.5)) < 3, `挖过去了（${secs} 秒，停在 ${end.map((n) => n.toFixed(0)).join(' ')}）`);
+    for (let y = LY - 5; y <= LY + 6; y++) await rcon(`fill ${LX - 22} ${y} ${LZ - 5} ${LX + 22} ${y} ${LZ + 5} air`);
+    for (let y = LY - 5; y < LY; y++) await rcon(`fill ${LX - 22} ${y} ${LZ - 5} ${LX + 22} ${y} ${LZ + 5} dirt`);
+    await rcon(`fill ${LX - 22} ${LY} ${LZ - 5} ${LX + 22} ${LY} ${LZ + 5} grass_block`);
+  }
+
+  if (want('直播 4：看门狗（单测）')) {
+    begin('直播 4：看门狗（单测）：不动就报、在挖或在走近不报');
+    const { stallWatch } = await import('../src/games/minecraft/body/mineflayerAdapter.js');
+    const { Vec3 } = await import('vec3');
+    {
+      const fake: any = { entity: { position: new Vec3(0, 0, 0) } };
+      let cancelled = false;
+      const w = stallWatch(fake, new Vec3(10, 0, 0), 2000, () => { cancelled = true; });
+      const t0 = Date.now();
+      const err = await w.stalled.catch((e: Error) => e);
+      check(Date.now() - t0 >= 2000 && Date.now() - t0 < 3500 && cancelled, `不动：${Date.now() - t0} ms 报错并取消`);
+      check(/no progress toward it for 2 s \(stuck at 0 0 0, still 11 blocks away\)/.test(String(err?.message)), `原因：${err?.message}`);
+    }
+    {
+      const fake: any = { entity: { position: new Vec3(0, 0, 0) }, targetDigBlock: {} };
+      let cancelled = false;
+      const w = stallWatch(fake, new Vec3(3, 0, 0), 1500, () => { cancelled = true; });
+      await sleep(3000);
+      w.stop();
+      check(!cancelled, '一直在挖：不报');
+    }
+    {
+      const fake: any = { entity: { position: new Vec3(0, 0, 0) } };
+      let cancelled = false;
+      const w = stallWatch(fake, new Vec3(30, 0, 0), 1500, () => { cancelled = true; });
+      for (let i = 0; i < 8; i++) { await sleep(400); fake.entity.position = new Vec3(i + 1, 0, 0); }
+      w.stop();
+      check(!cancelled, '一直在走近：不报');
+    }
+  }
+
+  if (want('直播 4/10：走路来回晃、不靠近')) {
+    begin('直播 4/10：走路来回晃、一直不靠近目标，要很快报出来');
+    await liveReset();
+    await sleep(500);
+    // 每 0.5 秒在两个离目标一样远的点之间来回传：人一直在动，但离目标没近过
+    let wobbling = true;
+    const wobble = (async () => {
+      let k = 0;
+      while (wobbling) { await rcon(`tp ${NAME} ${LX + 0.5} ${LY + 1} ${LZ + (k++ % 2 ? 3.5 : 0.5)}`); await sleep(500); }
+    })();
+    const t0 = Date.now();
+    const line = await act('go', { text: `${LX - 28} ${LY + 1} ${LZ + 2}` }, 400_000);
+    const secs = Math.round((Date.now() - t0) / 1000);
+    wobbling = false;
+    await wobble;
+    note(line.slice(0, 260));
+    check(secs <= 45, `45 秒内报出来（用了 ${secs} 秒）`);
+    check(/没走到|Could not reach|closer/.test(line), `说了没走到、为什么（${line.slice(0, 160)}）`);
+  }
+
+  if (want('直播 4：走不动时采集要很快报出来')) {
+    begin('直播 4：走不动时采集要很快报出来（一直被传回原地：寻路器一直试、人一步没挪）');
+    await liveReset();
+    await rcon(`give ${NAME} iron_pickaxe 1`);
+    await rcon(`setblock ${LX + 10} ${LY + 1} ${LZ} diamond_ore`);
+    await sleep(1000);
+    // 每 0.5 秒把她传回原地：寻路器以为在走，人一直在原地
+    let holding = true;
+    const hold = (async () => { while (holding) { await rcon(`tp ${NAME} ${LX + 0.5} ${LY + 1} ${LZ + 0.5}`); await sleep(500); } })();
+    const t0 = Date.now();
+    const line = await act('collect', { name: 'diamond_ore', index: 1 }, 240_000);
+    const secs = Math.round((Date.now() - t0) / 1000);
+    holding = false;
+    await hold;
+    note(line.slice(0, 300));
+    check(secs <= 45, `45 秒内报出来（用了 ${secs} 秒）`);
+    check(/5310 201 5000/.test(line) && /no progress|never got within reach|still there/.test(line), `说了卡在哪一块、为什么（${line.slice(0, 160)}）`);
+    await rcon(`setblock ${LX + 10} ${LY + 1} ${LZ} air`);
+
+    // 矿在 20 格外，每 0.2 秒传回原地：根本走不近，15 秒后看门狗放弃这一块
+    await rcon(`setblock ${LX + 20} ${LY + 1} ${LZ} diamond_ore`);
+    await sleep(800);
+    holding = true;
+    const hold2 = (async () => { while (holding) { await rcon(`tp ${NAME} ${LX + 0.5} ${LY + 1} ${LZ + 0.5}`); await sleep(200); } })();
+    const t1 = Date.now();
+    const line2 = await act('collect', { name: 'diamond_ore', index: 1 }, 240_000);
+    const secs2 = Math.round((Date.now() - t1) / 1000);
+    holding = false;
+    await hold2;
+    note(line2.slice(0, 300));
+    check(secs2 <= 45 && /5320 201 5000/.test(line2) && /no progress|never got within reach/.test(line2), `走不近：${secs2} 秒报出来、说了没进展（${line2.slice(0, 160)}）`);
+    await rcon(`setblock ${LX + 20} ${LY + 1} ${LZ} air`);
+  }
+
+  if (want('直播 7：苦力怕在旁边时逃跑（直播里每次 0 秒就失败：寻路目标被改了）')) {
+    begin('直播 7：苦力怕在旁边时逃跑（直播里每次 0 秒就失败：寻路目标被改了）');
+    for (let i = 0; i < 3; i++) {
+      await liveReset();
+      await rcon(`summon creeper ${LX + 3} ${LY + 1} ${LZ} {NoAI:1b}`);
+      await sleep(1500);
+      const start = await herPos();
+      const line = await act('flee', {}, 60_000);
+      const end = await herPos();
+      const moved = start.length && end.length ? Math.hypot(end[0] - start[0], end[2] - start[2]) : 0;
+      check(/：做完了/.test(line) && moved >= 5, `第 ${i + 1} 次：跑开了 ${moved.toFixed(1)} 格（${line.slice(0, 140)}）`);
+    }
+  }
+
 }
 
 /**
@@ -673,7 +1123,7 @@ async function journalCases(): Promise<void> {
   note(again.replace(/\n/g, ' | ').slice(0, 700));
   check(/你在这里玩过 1 次，上次是/.test(again), '说了玩过几次、上次什么时候');
   check(/目标：在空岛上盖一个家/.test(again) && again.includes(`家 (${X}, ${Y + 1}, ${Z})`) && /「小石台」/.test(again), '目标、地点、建筑都在');
-  check(/你的目标：在空岛上盖一个家/.test((await session.wait(AbortSignal.timeout(3000), 2000)).notes.join(' ')), '目标接上了（每个时刻都提醒）');
+  check(/你的目标（上一局写的）：在空岛上盖一个家/.test((await session.wait(AbortSignal.timeout(3000), 2000)).notes.join(' ')), '目标接上了（每个时刻都提醒）');
   const rebuild = session.refuse({ action: 'build', name: '小石台', text: `${X - 6} ${Y + 1} ${Z + 3}` });
   check(rebuild === null, `上一局的图纸能直接 build（${rebuild ?? '可以'}）`);
 
@@ -1056,6 +1506,7 @@ async function main(): Promise<void> {
     if (SUITE === 'all' || SUITE === 'edge') await edgeCases();
     if (SUITE === 'breath') await breathCases();
     if (SUITE === 'all' || SUITE === 'rcon') await rconCases();
+    if (SUITE === 'all' || SUITE === 'live') await liveCases();
     if (SUITE === 'all' || SUITE === 'build') await buildCases();
     if (SUITE === 'all' || SUITE === 'farm') await farmCases();
     if (SUITE === 'all' || SUITE === 'journal') await journalCases();
